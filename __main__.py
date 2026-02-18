@@ -17,7 +17,7 @@ def _import_builtin_nodes():
     import sigflow.nodes.crop  # noqa: F401
     import sigflow.nodes.audio_source  # noqa: F401
     import sigflow.nodes.spectrogram  # noqa: F401
-    import sigflow.nodes.plot_display  # noqa: F401
+    import sigflow.nodes.canvas_display  # noqa: F401
 
 
 def cmd_run(args):

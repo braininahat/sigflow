@@ -5,4 +5,4 @@ from sigflow.nodes import cv2_display  # noqa: F401
 from sigflow.nodes import crop  # noqa: F401
 from sigflow.nodes import audio_source  # noqa: F401
 from sigflow.nodes import spectrogram  # noqa: F401
-from sigflow.nodes import plot_display  # noqa: F401
+from sigflow.nodes import canvas_display  # noqa: F401

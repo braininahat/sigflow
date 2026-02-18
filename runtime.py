@@ -71,6 +71,7 @@ class NodeInstance:
                 coerce = _PARAM_COERCE.get(p.type)
                 if coerce and not isinstance(merged[p.name], coerce):
                     merged[p.name] = coerce(merged[p.name])
+        merged["_node_id"] = node_id
         self._config = merged
         self._state: dict = {}
         self._clock = clock
