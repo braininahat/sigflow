@@ -16,6 +16,11 @@ class EditorBridge:
     def __init__(self, node_graph):
         self._node_graph = node_graph
         self._pipeline: Pipeline | None = None
+        self._node_id_map: dict[int, str] = {}  # id(node) → clean name
+
+    def node_clean_name(self, node) -> str:
+        """Return the original clean name for a node (before metrics pollution)."""
+        return self._node_id_map.get(id(node), node.name())
 
     def _extract_graph(self) -> Graph:
         """Convert the current NodeGraphQt visual graph to a sigflow Graph."""
@@ -28,17 +33,18 @@ class EditorBridge:
             node_type = type(node).NODE_NAME
             config = {}
             for prop_name, prop_val in node.model.custom_properties.items():
-                config[prop_name] = prop_val
+                if not prop_name.startswith("_"):
+                    config[prop_name] = prop_val
 
-            nodes.append(NodeDef(id=node.name(), type=node_type, config=config))
+            nodes.append(NodeDef(id=self.node_clean_name(node), type=node_type, config=config))
 
         for node in self._node_graph.all_nodes():
             for port in node.output_ports():
                 for connected_port in port.connected_ports():
                     connections.append(Connection(
-                        src_id=node.name(),
+                        src_id=self.node_clean_name(node),
                         src_port=port.name(),
-                        dst_id=connected_port.node().name(),
+                        dst_id=self.node_clean_name(connected_port.node()),
                         dst_port=connected_port.name(),
                     ))
 
@@ -50,6 +56,11 @@ class EditorBridge:
         if self._pipeline:
             self.stop()
 
+        # Capture clean names before metrics overlay can pollute them
+        self._node_id_map.clear()
+        for node in self._node_graph.all_nodes():
+            self._node_id_map[id(node)] = node.name()
+
         graph = self._extract_graph()
         self._pipeline = Pipeline.from_graph(graph)
         self._pipeline.start()
@@ -59,6 +70,11 @@ class EditorBridge:
         if self._pipeline:
             self._pipeline.stop()
             self._pipeline = None
+            # Restore clean names (undo metrics overlay pollution)
+            for node in self._node_graph.all_nodes():
+                clean = self.node_clean_name(node)
+                node.set_property("name", clean)
+            self._node_id_map.clear()
             log.info("Pipeline stopped from editor")
 
     def update_metrics_overlay(self) -> None:
@@ -68,12 +84,13 @@ class EditorBridge:
 
         snapshots = self._pipeline.metrics_snapshot()
         for node in self._node_graph.all_nodes():
-            metrics = snapshots.get(node.name())
+            clean = self.node_clean_name(node)
+            metrics = snapshots.get(clean)
             if metrics:
                 fps_str = f"{metrics.fps:.1f} fps"
                 latency_str = f"{metrics.avg_process_ms:.1f}ms"
                 queue_str = f"q:{metrics.queue_depth}"
-                node.set_property("name", f"{type(node).NODE_NAME}\n{fps_str} | {latency_str} | {queue_str}")
+                node.set_property("name", f"{clean}\n{fps_str} | {latency_str} | {queue_str}")
 
     def load_graph(self, path: Path) -> None:
         """Load a graph from YAML/JSON and populate the visual editor."""

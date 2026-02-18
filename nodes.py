@@ -53,7 +53,7 @@ def _make_visual_node_class(spec: NodeSpec) -> type:
     _spec = spec
 
     class VisualNode(BaseNode):
-        __identifier__ = "sigflow"
+        __identifier__ = f"sigflow.{_spec.category}" if _spec.category else "sigflow"
         NODE_NAME = _spec.name
 
         def __init__(self):

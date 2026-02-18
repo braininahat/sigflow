@@ -36,6 +36,14 @@ class EditorWindow(QMainWindow):
         # Bridge between editor and pipeline runtime
         self._bridge = EditorBridge(self._graph)
 
+        # Right-click "Delete Selected" + Delete key shortcut
+        graph_menu = self._graph.get_context_menu('graph')
+        graph_menu.add_command(
+            'Delete Selected',
+            func=lambda graph: graph.delete_nodes(graph.selected_nodes()),
+            shortcut='Delete',
+        )
+
         # Layout
         graph_widget = self._graph.widget
         self.setCentralWidget(graph_widget)
@@ -86,7 +94,6 @@ class EditorWindow(QMainWindow):
         import sigflow.nodes.crop  # noqa: F401
         import sigflow.nodes.audio_source  # noqa: F401
         import sigflow.nodes.spectrogram  # noqa: F401
-        import sigflow.nodes.plot_display  # noqa: F401
         import sigflow.nodes.canvas_display  # noqa: F401
 
     def _on_start(self):
@@ -133,8 +140,7 @@ class EditorWindow(QMainWindow):
         for node in self._graph.all_nodes():
             if type(node).NODE_NAME != "canvas_display":
                 continue
-            label = node.get_property("label")
-            frame = _canvas_frames.get(label)
+            frame = _canvas_frames.get(self._bridge.node_clean_name(node))
             if frame is None:
                 continue
             widget = node.view.get_widget("_preview")
