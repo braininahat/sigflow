@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import signal
 import sys
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 
 def _import_builtin_nodes():
@@ -25,11 +28,13 @@ def cmd_run(args):
     _import_builtin_nodes()
 
     path = Path(args.graph)
+    log.info("loading graph from %s", path)
     if path.suffix in (".yaml", ".yml"):
         graph = Graph.load_yaml(path)
     else:
         graph = Graph.load_json(path)
 
+    log.info("graph: %d nodes, %d connections", len(graph.nodes), len(graph.connections))
     pipeline = Pipeline.from_graph(graph, max_workers=args.workers)
 
     # Handle Ctrl+C gracefully
@@ -39,17 +44,18 @@ def cmd_run(args):
         running = False
     signal.signal(signal.SIGINT, on_sigint)
 
-    print(f"Starting pipeline from {path} ...")
     pipeline.start()
 
     try:
+        import time
+        from sigflow.nodes.cv2_display import drain_display_queue
         while running:
-            import time
-            time.sleep(0.1)
+            if not drain_display_queue():
+                time.sleep(0.01)
     finally:
-        print("Stopping pipeline ...")
         pipeline.stop()
-        print("Done.")
+        import cv2
+        cv2.destroyAllWindows()
 
 
 def cmd_list_nodes(args):
@@ -82,6 +88,8 @@ def cmd_list_nodes(args):
 
 def main():
     parser = argparse.ArgumentParser(prog="sigflow", description="sigflow DAG pipeline framework")
+    parser.add_argument("-v", "--verbose", action="count", default=0,
+                        help="increase verbosity (-v info, -vv debug)")
     sub = parser.add_subparsers(dest="command")
 
     run_parser = sub.add_parser("run", help="Run a pipeline from a YAML/JSON graph file")
@@ -91,6 +99,18 @@ def main():
     sub.add_parser("list-nodes", help="List all registered node types")
 
     args = parser.parse_args()
+
+    level = logging.WARNING
+    if args.verbose >= 2:
+        level = logging.DEBUG
+    elif args.verbose >= 1:
+        level = logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)-5s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
     if args.command == "run":
         cmd_run(args)
     elif args.command == "list-nodes":

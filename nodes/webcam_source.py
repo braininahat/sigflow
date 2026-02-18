@@ -1,22 +1,31 @@
 """Webcam capture source node (cv2.VideoCapture)."""
+import logging
+
 import cv2
 
-from sigflow.node import source_node
+from sigflow.node import source_node, Param
 from sigflow.types import Port, Sample, CameraFrame
+
+log = logging.getLogger(__name__)
 
 
 @source_node(
     name="webcam",
     outputs=[Port("frame", CameraFrame)],
     category="source",
+    params=[
+        Param("device", "int", 0, label="Device Index", min=0, max=10),
+        Param("source_id", "str", "webcam", label="Source ID"),
+    ],
 )
 def webcam(*, state, config, clock):
     if "cap" not in state:
-        state["cap"] = cv2.VideoCapture(config.get("device", 0))
+        log.info("opening camera device %d", config["device"])
+        state["cap"] = cv2.VideoCapture(config["device"])
     ret, frame = state["cap"].read()
     if ret:
         return {"frame": Sample(
-            source_id=config.get("source_id", "webcam"),
+            source_id=config["source_id"],
             lsl_timestamp=clock.lsl_now(),
             session_time_ms=clock.session_time_ms(),
             data=frame,
@@ -29,4 +38,5 @@ def webcam(*, state, config, clock):
 @webcam.cleanup
 def webcam_cleanup(state, config):
     if "cap" in state:
+        log.info("releasing camera device")
         state["cap"].release()

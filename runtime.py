@@ -53,13 +53,25 @@ class MasterClock:
         return int((self._now() - self._start_time) * 1000)
 
 
+_PARAM_COERCE = {"int": int, "float": float, "str": str, "bool": bool}
+
+
 class NodeInstance:
     """Wraps a node function with threading, queues, and metrics."""
 
     def __init__(self, node_id: str, spec: NodeSpec, config: dict, clock: MasterClock, pipeline: Pipeline):
         self.node_id = node_id
         self._spec = spec
-        self._config = config
+        # Merge param defaults with user-provided config
+        merged = {p.name: p.default for p in spec.params}
+        merged.update(config)
+        # Coerce types (NodeGraphQt returns all widget values as strings)
+        for p in spec.params:
+            if p.name in merged:
+                coerce = _PARAM_COERCE.get(p.type)
+                if coerce and not isinstance(merged[p.name], coerce):
+                    merged[p.name] = coerce(merged[p.name])
+        self._config = merged
         self._state: dict = {}
         self._clock = clock
         self._pipeline = pipeline
@@ -96,26 +108,43 @@ class NodeInstance:
     def _invoke(self, item: Sample) -> None:
         """Call the node function and dispatch outputs."""
         t0 = time.perf_counter()
-        if self._spec.kind == "sink":
-            self._spec.func(item, state=self._state, config=self._config)
-        else:
-            result = self._spec.func(item, state=self._state, config=self._config)
-            if result:
-                self._pipeline._dispatch(self.node_id, result)
+        try:
+            if self._spec.kind == "sink":
+                self._spec.func(item, state=self._state, config=self._config)
+            else:
+                result = self._spec.func(item, state=self._state, config=self._config)
+                if result:
+                    self._pipeline._dispatch(self.node_id, result)
+        except Exception:
+            log.exception("node '%s' raised during invoke", self.node_id)
+            return
         elapsed_ms = (time.perf_counter() - t0) * 1000
         if self._metrics:
             self._metrics.record(elapsed_ms)
 
     def _run_source_loop(self) -> None:
         """Blocking loop for source nodes."""
+        log.debug("source loop started: %s", self.node_id)
+        consecutive_errors = 0
         while self._running:
             t0 = time.perf_counter()
-            result = self._spec.func(state=self._state, config=self._config, clock=self._clock)
+            try:
+                result = self._spec.func(state=self._state, config=self._config, clock=self._clock)
+            except Exception:
+                consecutive_errors += 1
+                if consecutive_errors >= 3:
+                    log.error("source '%s' failed %d times, stopping", self.node_id, consecutive_errors)
+                    break
+                log.exception("source '%s' raised during capture", self.node_id)
+                time.sleep(0.5)
+                continue
+            consecutive_errors = 0
             if result:
                 elapsed_ms = (time.perf_counter() - t0) * 1000
                 if self._metrics:
                     self._metrics.record(elapsed_ms)
                 self._pipeline._dispatch(self.node_id, result)
+        log.debug("source loop exited: %s", self.node_id)
 
     def _run_worker_loop(self) -> None:
         """Event-driven loop for process/sink nodes."""
@@ -145,19 +174,24 @@ class NodeInstance:
                 target=self._run_worker_loop, daemon=True, name=f"sigflow-{self.node_id}"
             )
         self._thread.start()
+        log.debug("started thread for %s node '%s'", self._spec.kind, self.node_id)
 
     def stop(self) -> None:
         self._running = False
         self._event.set()
         if self._thread:
             self._thread.join(timeout=3.0)
+            if self._thread.is_alive():
+                log.warning("node '%s' thread did not stop within 3s", self.node_id)
 
     def init(self) -> None:
         if self._spec.init_func:
+            log.debug("init: %s", self.node_id)
             self._spec.init_func(self._state, self._config)
 
     def cleanup(self) -> None:
         if self._spec.cleanup_func:
+            log.debug("cleanup: %s", self.node_id)
             self._spec.cleanup_func(self._state, self._config)
 
     def drain(self) -> None:
@@ -187,6 +221,7 @@ class Pipeline:
         instance = NodeInstance(node_id, spec, config, self._clock, self)
         instance._metrics = self._metrics.create_tracker(node_id)
         self._nodes[node_id] = instance
+        log.info("added %s node '%s' (type=%s)", spec.kind, node_id, node_type)
 
     def connect(self, src_id: str, src_port: str, dst_id: str, dst_port: str) -> None:
         src_node = self._nodes[src_id]
@@ -216,6 +251,7 @@ class Pipeline:
         self._connections.append(Connection(
             src_id=src_id, src_port=src_port, dst_id=dst_id, dst_port=dst_port,
         ))
+        log.info("connected %s.%s -> %s.%s", src_id, src_port, dst_id, dst_port)
 
     def _dispatch(self, src_id: str, outputs: dict[str, Sample]) -> None:
         """Route outputs from a node to all connected downstream nodes."""
@@ -240,9 +276,11 @@ class Pipeline:
             if node._spec.kind == "source":
                 node.start()
 
-        log.info("Pipeline started (live mode)")
+        log.info("pipeline started: %d nodes, %d connections",
+                 len(self._nodes), len(self._connections))
 
     def stop(self) -> None:
+        log.info("stopping pipeline ...")
         for node in self._nodes.values():
             if node._spec.kind == "source":
                 node.stop()
@@ -259,7 +297,7 @@ class Pipeline:
             node.cleanup()
 
         self._mode = PipelineMode.STOPPED
-        log.info("Pipeline stopped")
+        log.info("pipeline stopped")
 
     def drain(self) -> None:
         self._mode = PipelineMode.DRAINING

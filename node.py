@@ -1,10 +1,23 @@
 """Node decorators and NodeSpec for sigflow DAG nodes."""
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Callable
+from dataclasses import dataclass, field
+from typing import Any, Callable
 
 from sigflow.types import Port
+
+
+@dataclass
+class Param:
+    """Describes a configurable parameter for a node."""
+    name: str
+    type: str       # "int", "float", "str", "bool", "choice"
+    default: Any
+    label: str = ""
+    min: float | None = None
+    max: float | None = None
+    choices: list[str] | None = None
+    tooltip: str = ""
 
 
 @dataclass
@@ -18,6 +31,7 @@ class NodeSpec:
     func: Callable
     init_func: Callable | None = None
     cleanup_func: Callable | None = None
+    params: list[Param] = field(default_factory=list)
 
 
 def _make_decorator(kind: str, *, require_inputs: bool, require_outputs: bool):
@@ -28,9 +42,11 @@ def _make_decorator(kind: str, *, require_inputs: bool, require_outputs: bool):
         inputs: list[Port] | None = None,
         outputs: list[Port] | None = None,
         category: str = "",
+        params: list[Param] | None = None,
     ):
         inputs = inputs or []
         outputs = outputs or []
+        params = params or []
 
         if require_inputs and not inputs:
             raise ValueError(f"{kind}_node '{name}' must have at least one input port")
@@ -45,6 +61,7 @@ def _make_decorator(kind: str, *, require_inputs: bool, require_outputs: bool):
                 outputs=list(outputs),
                 category=category,
                 func=func,
+                params=list(params),
             )
             func.spec = spec
 

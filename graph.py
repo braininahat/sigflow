@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
 import yaml
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -55,19 +58,25 @@ class Graph:
     def save_yaml(self, path: Path) -> None:
         with open(path, "w") as f:
             yaml.dump(self._to_dict(), f, default_flow_style=False, sort_keys=False)
+        log.info("saved graph to %s (%d nodes, %d connections)", path, len(self.nodes), len(self.connections))
 
     @classmethod
     def load_yaml(cls, path: Path) -> Graph:
         with open(path) as f:
             data = yaml.safe_load(f)
-        return cls._from_dict(data)
+        graph = cls._from_dict(data)
+        log.info("loaded graph from %s (%d nodes, %d connections)", path, len(graph.nodes), len(graph.connections))
+        return graph
 
     def save_json(self, path: Path) -> None:
         with open(path, "w") as f:
             json.dump(self._to_dict(), f, indent=2)
+        log.info("saved graph to %s (%d nodes, %d connections)", path, len(self.nodes), len(self.connections))
 
     @classmethod
     def load_json(cls, path: Path) -> Graph:
         with open(path) as f:
             data = json.load(f)
-        return cls._from_dict(data)
+        graph = cls._from_dict(data)
+        log.info("loaded graph from %s (%d nodes, %d connections)", path, len(graph.nodes), len(graph.connections))
+        return graph
