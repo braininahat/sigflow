@@ -1,17 +1,23 @@
 """Main editor window wrapping NodeGraphQt graph widget."""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
-from PySide6.QtCore import QTimer
+import cv2
+
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
-    QMainWindow, QToolBar, QFileDialog, QLabel,
+    QDockWidget, QMainWindow, QToolBar, QFileDialog, QLabel,
 )
 
-from NodeGraphQt import NodeGraph
+from NodeGraphQt import NodeGraph, PropertiesBinWidget, NodesTreeWidget
 
 from sigflow_editor.nodes import register_visual_nodes
 from sigflow_editor.bridge import EditorBridge
+
+log = logging.getLogger(__name__)
 
 
 class EditorWindow(QMainWindow):
@@ -25,7 +31,6 @@ class EditorWindow(QMainWindow):
 
         # NodeGraphQt setup
         self._graph = NodeGraph()
-        self._graph.set_context_menu_from_file(None)
         register_visual_nodes(self._graph)
 
         # Bridge between editor and pipeline runtime
@@ -34,6 +39,20 @@ class EditorWindow(QMainWindow):
         # Layout
         graph_widget = self._graph.widget
         self.setCentralWidget(graph_widget)
+
+        # Node palette (drag-and-drop to create nodes)
+        nodes_tree = NodesTreeWidget(node_graph=self._graph)
+        nodes_dock = QDockWidget("Nodes")
+        nodes_dock.setWidget(nodes_tree)
+        self.addDockWidget(Qt.LeftDockWidgetArea, nodes_dock)
+
+        # Properties panel (click a node to edit its properties here)
+        properties_bin = PropertiesBinWidget(node_graph=self._graph)
+        self._graph.node_double_clicked.disconnect(properties_bin.add_node)
+        self._graph.node_selected.connect(properties_bin.add_node)
+        properties_dock = QDockWidget("Properties")
+        properties_dock.setWidget(properties_bin)
+        self.addDockWidget(Qt.RightDockWidgetArea, properties_dock)
 
         # Toolbar
         toolbar = QToolBar("Pipeline")
@@ -45,6 +64,8 @@ class EditorWindow(QMainWindow):
         toolbar.addAction("Load YAML...", self._on_load)
         toolbar.addAction("Save YAML...", self._on_save)
         toolbar.addSeparator()
+        toolbar.addAction("Auto Layout", self._on_auto_layout)
+        toolbar.addSeparator()
 
         self._status_label = QLabel("Stopped")
         toolbar.addWidget(self._status_label)
@@ -54,6 +75,11 @@ class EditorWindow(QMainWindow):
         self._metrics_timer.timeout.connect(self._update_metrics)
         self._metrics_timer.setInterval(200)
 
+        # Display pump timer (GUI updates must run on main thread)
+        self._display_timer = QTimer(self)
+        self._display_timer.timeout.connect(self._pump_display)
+        self._display_timer.setInterval(16)  # ~60fps
+
     def _import_builtin_nodes(self):
         import sigflow.nodes.webcam_source  # noqa: F401
         import sigflow.nodes.cv2_display  # noqa: F401
@@ -61,34 +87,74 @@ class EditorWindow(QMainWindow):
         import sigflow.nodes.audio_source  # noqa: F401
         import sigflow.nodes.spectrogram  # noqa: F401
         import sigflow.nodes.plot_display  # noqa: F401
+        import sigflow.nodes.canvas_display  # noqa: F401
 
     def _on_start(self):
+        log.info("starting pipeline from editor")
         self._bridge.build_and_start()
         self._status_label.setText("Running")
         self._metrics_timer.start()
+        self._display_timer.start()
 
     def _on_stop(self):
+        log.info("stopping pipeline from editor")
         self._bridge.stop()
         self._status_label.setText("Stopped")
         self._metrics_timer.stop()
+        self._display_timer.stop()
 
     def _on_load(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Load Pipeline", "", "YAML (*.yaml *.yml);;JSON (*.json)"
         )
         if path:
+            log.info("loading graph: %s", path)
             self._bridge.load_graph(Path(path))
+            self._graph.auto_layout_nodes()
+
+    def _on_auto_layout(self):
+        self._graph.auto_layout_nodes()
 
     def _on_save(self):
         path, _ = QFileDialog.getSaveFileName(
             self, "Save Pipeline", "", "YAML (*.yaml *.yml);;JSON (*.json)"
         )
         if path:
+            log.info("saving graph: %s", path)
             self._bridge.save_graph(Path(path))
+
+    def _pump_display(self):
+        from sigflow.nodes.cv2_display import drain_display_queue
+        drain_display_queue()
+
+        from sigflow.nodes.canvas_display import _canvas_frames
+        if not _canvas_frames:
+            return
+        for node in self._graph.all_nodes():
+            if type(node).NODE_NAME != "canvas_display":
+                continue
+            label = node.get_property("label")
+            frame = _canvas_frames.get(label)
+            if frame is None:
+                continue
+            widget = node.view.get_widget("_preview")
+            qlabel = widget.get_custom_widget()
+            h, w = frame.shape[:2]
+            if frame.ndim == 3:
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888)
+            else:
+                qimg = QImage(frame.data, w, h, w, QImage.Format.Format_Grayscale8)
+            pm = QPixmap.fromImage(qimg.copy())
+            qlabel.setPixmap(pm.scaled(
+                qlabel.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+            ))
 
     def _update_metrics(self):
         self._bridge.update_metrics_overlay()
 
     def closeEvent(self, event):
+        log.info("editor window closing")
+        self._display_timer.stop()
         self._bridge.stop()
         super().closeEvent(event)

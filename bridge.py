@@ -22,15 +22,17 @@ class EditorBridge:
         nodes = []
         connections = []
 
-        for node_id, node in self._node_graph.all_nodes().items():
-            node_type = node.NODE_NAME
+        for node in self._node_graph.all_nodes():
+            # type(node).NODE_NAME is the registry type; node.NODE_NAME is
+            # the display name (overwritten by NodeGraphQt.create_node).
+            node_type = type(node).NODE_NAME
             config = {}
             for prop_name, prop_val in node.model.custom_properties.items():
                 config[prop_name] = prop_val
 
             nodes.append(NodeDef(id=node.name(), type=node_type, config=config))
 
-        for node_id, node in self._node_graph.all_nodes().items():
+        for node in self._node_graph.all_nodes():
             for port in node.output_ports():
                 for connected_port in port.connected_ports():
                     connections.append(Connection(
@@ -40,6 +42,7 @@ class EditorBridge:
                         dst_port=connected_port.name(),
                     ))
 
+        log.debug("extracted graph: %d nodes, %d connections", len(nodes), len(connections))
         return Graph(nodes=nodes, connections=connections)
 
     def build_and_start(self) -> None:
@@ -64,16 +67,17 @@ class EditorBridge:
             return
 
         snapshots = self._pipeline.metrics_snapshot()
-        for node_id, node in self._node_graph.all_nodes().items():
+        for node in self._node_graph.all_nodes():
             metrics = snapshots.get(node.name())
             if metrics:
                 fps_str = f"{metrics.fps:.1f} fps"
                 latency_str = f"{metrics.avg_process_ms:.1f}ms"
                 queue_str = f"q:{metrics.queue_depth}"
-                node.set_property("name", f"{node.NODE_NAME}\n{fps_str} | {latency_str} | {queue_str}")
+                node.set_property("name", f"{type(node).NODE_NAME}\n{fps_str} | {latency_str} | {queue_str}")
 
     def load_graph(self, path: Path) -> None:
         """Load a graph from YAML/JSON and populate the visual editor."""
+        log.info("loading graph from %s", path)
         if path.suffix in (".yaml", ".yml"):
             graph = Graph.load_yaml(path)
         else:
@@ -83,10 +87,15 @@ class EditorBridge:
 
         node_map = {}
         for i, node_def in enumerate(graph.nodes):
-            visual_cls = f"sigflow.{node_def.type}"
+            visual_cls = f"sigflow.Visual_{node_def.type}"
             visual_node = self._node_graph.create_node(visual_cls, name=node_def.id)
             visual_node.set_pos(i * 250, 0)
+            # Restore config values to node properties
+            for key, val in node_def.config.items():
+                if visual_node.has_property(key):
+                    visual_node.set_property(key, val)
             node_map[node_def.id] = visual_node
+            log.debug("created visual node '%s' (type=%s)", node_def.id, node_def.type)
 
         for conn in graph.connections:
             src_node = node_map.get(conn.src_id)
@@ -96,9 +105,13 @@ class EditorBridge:
                 dst_port = dst_node.get_input(conn.dst_port)
                 if src_port and dst_port:
                     src_port.connect_to(dst_port)
+                    log.debug("connected %s.%s -> %s.%s", conn.src_id, conn.src_port, conn.dst_id, conn.dst_port)
+
+        log.info("loaded %d nodes, %d connections into editor", len(node_map), len(graph.connections))
 
     def save_graph(self, path: Path) -> None:
         """Save the current visual graph to YAML/JSON."""
+        log.info("saving graph to %s", path)
         graph = self._extract_graph()
         if path.suffix in (".yaml", ".yml"):
             graph.save_yaml(path)
