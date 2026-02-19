@@ -46,15 +46,35 @@ _KIND_COLORS = {
 }
 
 
+_ACRONYMS = {'dlc', 'cv2', 'roi'}
+
+# Map node kind to palette group name
+_KIND_GROUP = {"source": "source", "process": "processing", "sink": "output"}
+
+
+def _display_name(name: str) -> str:
+    """Convert registry name to friendly display name.
+
+    'dlc_inference' → 'DLC Inference', 'roi_crop' → 'ROI Crop'
+    """
+    return ' '.join(
+        p.upper() if p in _ACRONYMS else p.capitalize()
+        for p in name.split('_')
+    )
+
+
 def _make_visual_node_class(spec: NodeSpec) -> type:
     """Dynamically create a NodeGraphQt BaseNode subclass from a NodeSpec."""
 
     # Capture spec in closure for __init__
     _spec = spec
 
+    _group = _KIND_GROUP[_spec.kind]
+
     class VisualNode(BaseNode):
-        __identifier__ = f"sigflow.{_spec.category}" if _spec.category else "sigflow"
-        NODE_NAME = _spec.name
+        __identifier__ = f"sigflow.{_group}.{_spec.category}" if _spec.category else f"sigflow.{_group}"
+        NODE_NAME = _display_name(_spec.name)
+        _REGISTRY_TYPE = _spec.name
 
         def __init__(self):
             super().__init__()

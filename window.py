@@ -8,16 +8,63 @@ import cv2
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtCore import QSize
 from PySide6.QtWidgets import (
     QDockWidget, QMainWindow, QToolBar, QFileDialog, QLabel,
 )
 
 from NodeGraphQt import NodeGraph, PropertiesBinWidget, NodesTreeWidget
+from NodeGraphQt.custom_widgets.nodes_tree import _BaseNodeTreeItem, TYPE_CATEGORY
 
+from sigflow.registry import all_nodes
 from sigflow_editor.nodes import register_visual_nodes
 from sigflow_editor.bridge import EditorBridge
 
 log = logging.getLogger(__name__)
+
+
+def _restructure_palette(tree):
+    """Restructure flat palette into Sources / Processing / Output hierarchy."""
+    # Create three ordered parent groups
+    parents = {}
+    for label in ("Sources", "Processing", "Output"):
+        item = _BaseNodeTreeItem(None, [label], type=TYPE_CATEGORY)
+        item.setFirstColumnSpanned(True)
+        item.setFlags(Qt.ItemIsEnabled)
+        item.setSizeHint(0, QSize(100, 26))
+        parents[label.lower()] = item
+
+    # Map flat category keys to parent groups
+    _GROUP_PARENT = {"source": "sources", "processing": "processing", "output": "output"}
+
+    for cat_key, cat_item in list(tree._category_items.items()):
+        if not cat_key.startswith("sigflow."):
+            cat_item.setHidden(True)  # hide backdrop etc.
+            continue
+
+        parts = cat_key.split(".")  # e.g. ["sigflow", "source"] or ["sigflow", "processing", "transform"]
+        group = parts[1]
+        parent = parents.get(_GROUP_PARENT.get(group))
+        if not parent:
+            continue
+
+        # Detach from top level
+        idx = tree.indexOfTopLevelItem(cat_item)
+        if idx >= 0:
+            tree.takeTopLevelItem(idx)
+
+        if len(parts) == 2:
+            # No subcategory (source/output) — move node items directly under parent
+            while cat_item.childCount() > 0:
+                parent.addChild(cat_item.takeChild(0))
+        else:
+            # Has subcategory (processing.transform etc.) — nest as sub-group
+            parent.addChild(cat_item)
+
+    # Add parent groups in desired order
+    for key in ("sources", "processing", "output"):
+        tree.addTopLevelItem(parents[key])
+        parents[key].setExpanded(True)
 
 
 class EditorWindow(QMainWindow):
@@ -53,6 +100,18 @@ class EditorWindow(QMainWindow):
 
         # Node palette (drag-and-drop to create nodes)
         nodes_tree = NodesTreeWidget(node_graph=self._graph)
+
+        # Set subcategory labels (just the tag name — they'll nest under Processing)
+        _KIND_GROUP = {"source": "source", "process": "processing", "sink": "output"}
+        for spec in all_nodes().values():
+            if spec.category:
+                group = _KIND_GROUP[spec.kind]
+                key = f"sigflow.{group}.{spec.category}"
+                nodes_tree.set_category_label(key, spec.category.capitalize())
+
+        # Restructure flat tree into Sources / Processing / Output hierarchy
+        _restructure_palette(nodes_tree)
+
         nodes_dock = QDockWidget("Nodes")
         nodes_dock.setWidget(nodes_tree)
         self.addDockWidget(Qt.LeftDockWidgetArea, nodes_dock)
@@ -100,6 +159,10 @@ class EditorWindow(QMainWindow):
         import sigflow.nodes.canvas_display  # noqa: F401
         import sigflow.nodes.dlc_inference  # noqa: F401
         import sigflow.nodes.keypoints_overlay  # noqa: F401
+        import sigflow.nodes.face_mesh  # noqa: F401
+        import sigflow.nodes.face_roi  # noqa: F401
+        import sigflow.nodes.roi_crop  # noqa: F401
+        import sigflow.nodes.mesh_overlay  # noqa: F401
 
     def _on_start(self):
         log.info("starting pipeline from editor")
@@ -143,7 +206,7 @@ class EditorWindow(QMainWindow):
         if not _canvas_frames:
             return
         for node in self._graph.all_nodes():
-            if type(node).NODE_NAME != "canvas_display":
+            if type(node)._REGISTRY_TYPE != "canvas_display":
                 continue
             frame = _canvas_frames.get(self._bridge.node_clean_name(node))
             if frame is None:

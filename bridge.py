@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 
 from sigflow.graph import Graph, NodeDef, Connection
+from sigflow.registry import get as registry_get
 from sigflow.runtime import Pipeline
 
 log = logging.getLogger(__name__)
@@ -28,9 +29,7 @@ class EditorBridge:
         connections = []
 
         for node in self._node_graph.all_nodes():
-            # type(node).NODE_NAME is the registry type; node.NODE_NAME is
-            # the display name (overwritten by NodeGraphQt.create_node).
-            node_type = type(node).NODE_NAME
+            node_type = type(node)._REGISTRY_TYPE
             config = {}
             for prop_name, prop_val in node.model.custom_properties.items():
                 if not prop_name.startswith("_"):
@@ -111,7 +110,10 @@ class EditorBridge:
 
         node_map = {}
         for i, node_def in enumerate(graph.nodes):
-            visual_cls = f"sigflow.Visual_{node_def.type}"
+            spec = registry_get(node_def.type)
+            group = {"source": "source", "process": "processing", "sink": "output"}[spec.kind]
+            identifier = f"sigflow.{group}.{spec.category}" if spec.category else f"sigflow.{group}"
+            visual_cls = f"{identifier}.Visual_{node_def.type}"
             visual_node = self._node_graph.create_node(visual_cls, name=node_def.id)
             visual_node.set_pos(i * 250, 0)
             # Restore config values to node properties
