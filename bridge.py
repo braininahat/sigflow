@@ -92,6 +92,13 @@ class EditorBridge:
                 queue_str = f"q:{metrics.queue_depth}"
                 node.set_property("name", f"{clean}\n{fps_str} | {latency_str} | {queue_str}")
 
+    def on_property_changed(self, node, prop_name, prop_value) -> None:
+        """Propagate editor property changes to running pipeline."""
+        if not self._pipeline or prop_name.startswith("_") or prop_name == "name":
+            return
+        clean_name = self.node_clean_name(node)
+        self._pipeline.update_node_config(clean_name, prop_name, prop_value)
+
     def load_graph(self, path: Path) -> None:
         """Load a graph from YAML/JSON and populate the visual editor."""
         log.info("loading graph from %s", path)

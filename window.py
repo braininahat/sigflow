@@ -36,6 +36,9 @@ class EditorWindow(QMainWindow):
         # Bridge between editor and pipeline runtime
         self._bridge = EditorBridge(self._graph)
 
+        # Live property editing → propagate to running pipeline
+        self._graph.property_changed.connect(self._bridge.on_property_changed)
+
         # Right-click "Delete Selected" + Delete key shortcut
         graph_menu = self._graph.get_context_menu('graph')
         graph_menu.add_command(
@@ -95,6 +98,8 @@ class EditorWindow(QMainWindow):
         import sigflow.nodes.audio_source  # noqa: F401
         import sigflow.nodes.spectrogram  # noqa: F401
         import sigflow.nodes.canvas_display  # noqa: F401
+        import sigflow.nodes.dlc_inference  # noqa: F401
+        import sigflow.nodes.keypoints_overlay  # noqa: F401
 
     def _on_start(self):
         log.info("starting pipeline from editor")

@@ -91,10 +91,6 @@ def _make_visual_node_class(spec: NodeSpec) -> type:
                 elif param.type == "choice":
                     self.add_combo_menu(param.name, label=label, items=param.choices or [])
 
-            # Disable inline widgets — editing happens in the Properties panel
-            for w in self.view.widgets.values():
-                w.widget().setDisabled(True)
-
             # Embed image preview for canvas_display nodes
             if _spec.name == "canvas_display":
                 preview = NodeImageDisplay(self.view, name="_preview", label="")
