@@ -32,7 +32,7 @@ class EditorBridge:
             node_type = type(node)._REGISTRY_TYPE
             config = {}
             for prop_name, prop_val in node.model.custom_properties.items():
-                if not prop_name.startswith("_"):
+                if not prop_name.startswith("_") and prop_name != "recording":
                     config[prop_name] = prop_val
 
             nodes.append(NodeDef(id=self.node_clean_name(node), type=node_type, config=config))
@@ -134,6 +134,16 @@ class EditorBridge:
                     log.debug("connected %s.%s -> %s.%s", conn.src_id, conn.src_port, conn.dst_id, conn.dst_port)
 
         log.info("loaded %d nodes, %d connections into editor", len(node_map), len(graph.connections))
+
+    def start_recording(self, output_dir="recordings", **kwargs) -> None:
+        if self._pipeline:
+            self._pipeline.start_recording(output_dir, **kwargs)
+
+    def stop_recording(self):
+        """Stop recording and return session dir Path or None."""
+        if self._pipeline:
+            return self._pipeline.stop_recording()
+        return None
 
     def save_graph(self, path: Path) -> None:
         """Save the current visual graph to YAML/JSON."""

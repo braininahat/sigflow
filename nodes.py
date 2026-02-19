@@ -5,7 +5,7 @@ import logging
 
 from Qt import QtCore, QtWidgets
 from NodeGraphQt import BaseNode
-from NodeGraphQt.constants import Z_VAL_NODE_WIDGET
+from NodeGraphQt.constants import Z_VAL_NODE_WIDGET, NodePropWidgetEnum
 from NodeGraphQt.widgets.node_widgets import NodeBaseWidget
 
 from sigflow.registry import all_nodes
@@ -110,6 +110,14 @@ def _make_visual_node_class(spec: NodeSpec) -> type:
                     self.add_checkbox(param.name, label=label, state=param.default)
                 elif param.type == "choice":
                     self.add_combo_menu(param.name, label=label, items=param.choices or [])
+
+            # Add recording property to non-sink nodes (properties-panel only)
+            if _spec.kind != "sink":
+                self.create_property(
+                    "recording", value=False,
+                    widget_type=NodePropWidgetEnum.QCHECK_BOX.value,
+                    widget_tooltip="Record outputs from this node",
+                )
 
             # Embed image preview for canvas_display nodes
             if _spec.name == "canvas_display":

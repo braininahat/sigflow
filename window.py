@@ -16,9 +16,11 @@ from PySide6.QtWidgets import (
 from NodeGraphQt import NodeGraph, PropertiesBinWidget, NodesTreeWidget
 from NodeGraphQt.custom_widgets.nodes_tree import _BaseNodeTreeItem, TYPE_CATEGORY
 
+from sigflow.reader import SessionReader
 from sigflow.registry import all_nodes
 from sigflow_editor.nodes import register_visual_nodes
 from sigflow_editor.bridge import EditorBridge
+from sigflow_editor.timeline import TimelinePanel
 
 log = logging.getLogger(__name__)
 
@@ -124,6 +126,12 @@ class EditorWindow(QMainWindow):
         properties_dock.setWidget(properties_bin)
         self.addDockWidget(Qt.RightDockWidgetArea, properties_dock)
 
+        # Timeline panel (bottom dock)
+        self._timeline_panel = TimelinePanel()
+        timeline_dock = QDockWidget("Timeline")
+        timeline_dock.setWidget(self._timeline_panel)
+        self.addDockWidget(Qt.BottomDockWidgetArea, timeline_dock)
+
         # Toolbar
         toolbar = QToolBar("Pipeline")
         self.addToolBar(toolbar)
@@ -131,10 +139,15 @@ class EditorWindow(QMainWindow):
         toolbar.addAction("Start", self._on_start)
         toolbar.addAction("Stop", self._on_stop)
         toolbar.addSeparator()
+        toolbar.addAction("Record", self._on_record)
+        toolbar.addAction("Stop Recording", self._on_stop_record)
+        toolbar.addSeparator()
         toolbar.addAction("Load YAML...", self._on_load)
         toolbar.addAction("Save YAML...", self._on_save)
         toolbar.addSeparator()
         toolbar.addAction("Auto Layout", self._on_auto_layout)
+        toolbar.addSeparator()
+        toolbar.addAction("Open Session...", self._on_open_session)
         toolbar.addSeparator()
 
         self._status_label = QLabel("Stopped")
@@ -163,6 +176,9 @@ class EditorWindow(QMainWindow):
         import sigflow.nodes.face_roi  # noqa: F401
         import sigflow.nodes.roi_crop  # noqa: F401
         import sigflow.nodes.mesh_overlay  # noqa: F401
+        import sigflow.nodes.scrcpy_screen  # noqa: F401
+        import sigflow.nodes.scrcpy_camera  # noqa: F401
+        import sigflow.nodes.scrcpy_mic  # noqa: F401
 
     def _on_start(self):
         log.info("starting pipeline from editor")
@@ -178,6 +194,19 @@ class EditorWindow(QMainWindow):
         self._metrics_timer.stop()
         self._display_timer.stop()
 
+    def _on_record(self):
+        log.info("starting recording from editor")
+        self._bridge.start_recording()
+        self._status_label.setText("Recording")
+
+    def _on_stop_record(self):
+        log.info("stopping recording from editor")
+        session_dir = self._bridge.stop_recording()
+        self._status_label.setText("Running")
+        if session_dir:
+            reader = SessionReader(session_dir)
+            self._timeline_panel.load_session(reader)
+
     def _on_load(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Load Pipeline", "", "YAML (*.yaml *.yml);;JSON (*.json)"
@@ -189,6 +218,13 @@ class EditorWindow(QMainWindow):
 
     def _on_auto_layout(self):
         self._graph.auto_layout_nodes()
+
+    def _on_open_session(self):
+        dir_path = QFileDialog.getExistingDirectory(self, "Open Session")
+        if dir_path:
+            log.info("opening session: %s", dir_path)
+            reader = SessionReader(Path(dir_path))
+            self._timeline_panel.load_session(reader)
 
     def _on_save(self):
         path, _ = QFileDialog.getSaveFileName(
