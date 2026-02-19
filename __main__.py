@@ -18,6 +18,8 @@ def _import_builtin_nodes():
     import sigflow.nodes.audio_source  # noqa: F401
     import sigflow.nodes.spectrogram  # noqa: F401
     import sigflow.nodes.canvas_display  # noqa: F401
+    import sigflow.nodes.dlc_inference  # noqa: F401
+    import sigflow.nodes.keypoints_overlay  # noqa: F401
 
 
 def cmd_run(args):

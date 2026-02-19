@@ -202,6 +202,16 @@ class NodeInstance:
                 item = q.popleft()
                 self._invoke(item)
 
+    def update_config(self, key: str, value) -> None:
+        """Hot-update a config value (thread-safe for simple types under GIL)."""
+        param_type = next(
+            (p.type for p in self._spec.params if p.name == key), None
+        )
+        coerce = _PARAM_COERCE.get(param_type)
+        if coerce and not isinstance(value, coerce):
+            value = coerce(value)
+        self._config[key] = value
+
     def queue_depth(self) -> int:
         return sum(len(q) for q in self._queues.values())
 
@@ -304,6 +314,12 @@ class Pipeline:
         self._mode = PipelineMode.DRAINING
         for node in self._nodes.values():
             node.drain()
+
+    def update_node_config(self, node_id: str, key: str, value) -> None:
+        """Hot-update a config value on a running node."""
+        node = self._nodes.get(node_id)
+        if node:
+            node.update_config(key, value)
 
     def metrics_snapshot(self) -> dict:
         snapshots = {}
