@@ -33,7 +33,6 @@ def drain_display_queue() -> bool:
 @sink_node(
     name="cv2_display",
     inputs=[Port("frame", TimeSeries2D)],
-    category="display",
     params=[
         Param("window_name", "str", "sigflow", label="Window Name"),
     ],

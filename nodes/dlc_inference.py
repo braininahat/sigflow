@@ -113,7 +113,7 @@ def _load_model(state, config):
 @process_node(
     name="dlc_inference",
     inputs=[Port("frame", TimeSeries2D)],
-    outputs=[Port("keypoints", Keypoints)],
+    outputs=[Port("frame", TimeSeries2D), Port("keypoints", Keypoints)],
     category="inference",
     params=[
         Param("model_path", "str", "weights/lips.onnx", label="Model Path"),
@@ -145,4 +145,5 @@ def dlc_inference(item, *, state, config):
                 "frame_shape": frame.shape[:2],
             },
         ),
+        "frame": item,
     }

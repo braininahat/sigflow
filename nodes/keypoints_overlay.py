@@ -14,7 +14,7 @@ from sigflow.types import Port, TimeSeries2D, Keypoints
     name="keypoints_overlay",
     inputs=[Port("frame", TimeSeries2D), Port("keypoints", Keypoints)],
     outputs=[Port("overlay", TimeSeries2D)],
-    category="display",
+    category="visualization",
     params=[
         Param("confidence_threshold", "float", 0.1,
               label="Min Confidence", min=0.0, max=1.0),

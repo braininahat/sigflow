@@ -12,7 +12,6 @@ log = logging.getLogger(__name__)
 @source_node(
     name="webcam",
     outputs=[Port("frame", CameraFrame)],
-    category="source",
     params=[
         Param("device", "int", 0, label="Device Index", min=0, max=10),
         Param("source_id", "str", "webcam", label="Source ID"),

@@ -40,7 +40,6 @@ _RATE_CHOICES = _discover_supported_rates()
 @source_node(
     name="microphone",
     outputs=[Port("audio", AudioSignal)],
-    category="source",
     params=[
         Param("source_id", "str", "mic", label="Source ID"),
         Param("chunk_size", "int", 1024, label="Chunk Size", min=128, max=8192),

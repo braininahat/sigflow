@@ -53,7 +53,6 @@ def _render_2d(data: np.ndarray) -> np.ndarray:
 @sink_node(
     name="canvas_display",
     inputs=[Port("signal", TimeSeries)],
-    category="display",
     params=[Param("label", "str", "output", label="Label")],
 )
 def canvas_display(item, *, state, config):
