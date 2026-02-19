@@ -55,19 +55,20 @@ def mesh_overlay(item, *, state, config):
 
     _load_connections()
 
-    frame = state["frame"].data.copy()
-    landmarks = state["landmarks"].data  # (468, 3) normalized
+    frame_sample = state.pop("frame")
+    landmarks_data = state.pop("landmarks").data  # (468, 3) normalized
+    frame = frame_sample.data.copy()
     h, w = frame.shape[:2]
     thickness = config["thickness"]
 
     connections = _CONNECTION_SETS.get(config["style"], _CONNECTION_SETS["contours"])
 
     # Convert normalized coords to pixel coords once
-    px = (landmarks[:, 0] * w).astype(np.int32)
-    py = (landmarks[:, 1] * h).astype(np.int32)
+    px = (landmarks_data[:, 0] * w).astype(np.int32)
+    py = (landmarks_data[:, 1] * h).astype(np.int32)
 
     for start, end in connections:
         cv2.line(frame, (px[start], py[start]), (px[end], py[end]),
                  (0, 255, 0), thickness)
 
-    return {"overlay": state["frame"].replace(data=frame)}
+    return {"overlay": frame_sample.replace(data=frame)}

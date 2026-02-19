@@ -99,6 +99,7 @@ class Sample:
     data: Any
     metadata: dict = field(default_factory=dict)
     port_type: type[PortType] = PortType
+    frame_id: int = 0
 
     def with_metadata(self, **kw) -> Sample:
         """Shallow copy with merged metadata. Data is shared (zero-copy)."""

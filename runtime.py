@@ -10,6 +10,7 @@ from collections import deque
 from sigflow.graph import Connection
 from sigflow.metrics import MetricsCollector, MetricsTracker
 from sigflow.node import NodeSpec
+from sigflow.recorder import SessionRecorder
 from sigflow.registry import get as registry_get
 from sigflow.types import Sample, compatible
 
@@ -83,6 +84,8 @@ class NodeInstance:
         self._thread: threading.Thread | None = None
         self._running = False
         self._event = threading.Event()
+        self._next_frame_id: int = 0
+        self._connected_ports: set[str] = set()
 
     def on_input(self, port_name: str, sample: Sample) -> None:
         """Thread-safe: push sample into input deque and wake worker."""
@@ -91,11 +94,18 @@ class NodeInstance:
             self._event.set()
 
     def _process_queues(self) -> None:
-        """Process one item from the first non-empty queue."""
+        """Dispatch to single-input or correlated multi-input processing."""
+        if len(self._connected_ports) > 1:
+            self._process_correlated()
+        else:
+            self._process_single()
+
+    def _process_single(self) -> None:
+        """Process one item from the first non-empty queue (single-input nodes)."""
         for port_name, q in self._queues.items():
             if not q:
                 continue
-            if self._pipeline._mode == PipelineMode.LIVE:
+            if self._pipeline._mode == PipelineMode.LIVE and not self._spec.lossless:
                 item = q.pop()
                 skipped = len(q)
                 q.clear()
@@ -105,6 +115,62 @@ class NodeInstance:
                 item = q.popleft()
             self._invoke(item)
             return
+
+    def _process_correlated(self) -> None:
+        """Multi-input: consume items with matching frame_id across all connected ports."""
+        for port_name in self._connected_ports:
+            if not self._queues.get(port_name):
+                return
+
+        lossy = self._pipeline._mode == PipelineMode.LIVE and not self._spec.lossless
+
+        if lossy:
+            common_fids = None
+            for port_name in self._connected_ports:
+                q = self._queues[port_name]
+                port_fids = {item.frame_id for item in q}
+                if common_fids is None:
+                    common_fids = port_fids
+                else:
+                    common_fids &= port_fids
+
+            if not common_fids:
+                return
+
+            target_fid = max(common_fids)
+        else:
+            target_fid = max(self._queues[p][0].frame_id for p in self._connected_ports)
+
+        items = []
+        total_skipped = 0
+        for port_name in self._connected_ports:
+            q = self._queues[port_name]
+            while q and q[0].frame_id < target_fid:
+                q.popleft()
+                total_skipped += 1
+            if q and q[0].frame_id == target_fid:
+                items.append(q.popleft())
+
+        if lossy and self._metrics and total_skipped > 0:
+            self._metrics.record_skipped(total_skipped)
+
+        if len(items) != len(self._connected_ports):
+            return
+
+        t0 = time.perf_counter()
+        for item in items:
+            try:
+                if self._spec.kind == "sink":
+                    self._spec.func(item, state=self._state, config=self._config)
+                else:
+                    result = self._spec.func(item, state=self._state, config=self._config)
+                    if result:
+                        self._pipeline._dispatch(self.node_id, result)
+            except Exception:
+                log.exception("node '%s' raised during correlated invoke", self.node_id)
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        if self._metrics:
+            self._metrics.record(elapsed_ms)
 
     def _invoke(self, item: Sample) -> None:
         """Call the node function and dispatch outputs."""
@@ -141,6 +207,10 @@ class NodeInstance:
                 continue
             consecutive_errors = 0
             if result:
+                fid = self._next_frame_id
+                self._next_frame_id += 1
+                for sample in result.values():
+                    sample.frame_id = fid
                 elapsed_ms = (time.perf_counter() - t0) * 1000
                 if self._metrics:
                     self._metrics.record(elapsed_ms)
@@ -226,6 +296,7 @@ class Pipeline:
         self._metrics = MetricsCollector()
         self._mode = PipelineMode.STOPPED
         self._max_workers = max_workers
+        self._recorder: SessionRecorder | None = None
 
     def add_node(self, node_id: str, node_type: str, config: dict) -> None:
         spec = registry_get(node_type)
@@ -267,6 +338,8 @@ class Pipeline:
     def _dispatch(self, src_id: str, outputs: dict[str, Sample]) -> None:
         """Route outputs from a node to all connected downstream nodes."""
         for port_name, sample in outputs.items():
+            if self._recorder and self._nodes[src_id]._config.get("recording"):
+                self._recorder.write(sample)
             for conn in self._connections:
                 if conn.src_id == src_id and conn.src_port == port_name:
                     copy = sample.replace(metadata=dict(sample.metadata))
@@ -275,6 +348,9 @@ class Pipeline:
     def start(self) -> None:
         self._clock.start()
         self._mode = PipelineMode.LIVE
+
+        for node_id, node in self._nodes.items():
+            node._connected_ports = {c.dst_port for c in self._connections if c.dst_id == node_id}
 
         for node in self._nodes.values():
             node.init()
@@ -304,11 +380,29 @@ class Pipeline:
                 node.stop()
                 node.drain()
 
+        if self._recorder:
+            self._recorder.finalize()
+            self._recorder = None
+
         for node in self._nodes.values():
             node.cleanup()
 
         self._mode = PipelineMode.STOPPED
         log.info("pipeline stopped")
+
+    def start_recording(self, output_dir="recordings", video_fps=30, video_codec="mp4v") -> None:
+        """Start recording outputs from nodes with recording=True."""
+        self._recorder = SessionRecorder(output_dir, video_fps, video_codec)
+        log.info("recording started (output_dir=%s)", output_dir)
+
+    def stop_recording(self):
+        """Stop recording and finalize the session. Returns session dir Path or None."""
+        if self._recorder:
+            session_dir = self._recorder.finalize()
+            self._recorder = None
+            log.info("recording stopped")
+            return session_dir
+        return None
 
     def drain(self) -> None:
         self._mode = PipelineMode.DRAINING

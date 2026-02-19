@@ -21,6 +21,7 @@ def webcam(*, state, config, clock):
     if "cap" not in state:
         log.info("opening camera device %d", config["device"])
         state["cap"] = cv2.VideoCapture(config["device"])
+        state["cap"].set(cv2.CAP_PROP_BUFFERSIZE, 1)
     ret, frame = state["cap"].read()
     if ret:
         return {"frame": Sample(

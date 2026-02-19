@@ -32,14 +32,16 @@ def keypoints_overlay(item, *, state, config):
     if "frame" not in state or "keypoints" not in state:
         return None
 
-    frame = state["frame"].data.copy()
-    kps = state["keypoints"].data  # (num_joints, 3): [x, y, confidence]
+    frame_sample = state.pop("frame")
+    kps_sample = state.pop("keypoints")
+    frame = frame_sample.data.copy()
+    kps = kps_sample.data  # (num_joints, 3): [x, y, confidence]
     threshold = config["confidence_threshold"]
     radius = config["radius"]
 
     # Scale keypoints if frame dimensions differ from inference input
     frame_h, frame_w = frame.shape[:2]
-    infer_shape = state["keypoints"].metadata.get("frame_shape")
+    infer_shape = kps_sample.metadata.get("frame_shape")
     if infer_shape and (infer_shape[0] != frame_h or infer_shape[1] != frame_w):
         scale_x = frame_w / infer_shape[1]
         scale_y = frame_h / infer_shape[0]
@@ -53,4 +55,4 @@ def keypoints_overlay(item, *, state, config):
             py = int(y * scale_y)
             cv2.circle(frame, (px, py), radius, (0, 255, 0), -1)
 
-    return {"overlay": state["frame"].replace(data=frame)}
+    return {"overlay": frame_sample.replace(data=frame)}

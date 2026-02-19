@@ -32,8 +32,7 @@ def face_mesh(item, *, state, config):
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
 
-    state["_ts"] = state.get("_ts", 0) + 1
-    result = state["landmarker"].detect_for_video(mp_image, state["_ts"])
+    result = state["landmarker"].detect(mp_image)
 
     if not result.face_landmarks:
         return None
@@ -56,13 +55,11 @@ def face_mesh_init(state, config):
     base_options = mp.tasks.BaseOptions(model_asset_path=_MODEL_PATH)
     options = mp.tasks.vision.FaceLandmarkerOptions(
         base_options=base_options,
-        running_mode=mp.tasks.vision.RunningMode.VIDEO,
+        running_mode=mp.tasks.vision.RunningMode.IMAGE,
         num_faces=1,
         min_face_detection_confidence=0.5,
-        min_tracking_confidence=0.5,
     )
     state["landmarker"] = mp.tasks.vision.FaceLandmarker.create_from_options(options)
-    state["_ts"] = 0
     log.info("initialized MediaPipe FaceLandmarker (model=%s)", _MODEL_PATH)
 
 
