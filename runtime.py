@@ -1,4 +1,4 @@
-"""Pipeline runtime: Qt-free DAG execution with threading, deque queues, and metrics."""
+"""Pipeline runtime: reactive DAG execution with generation-based correlation."""
 from __future__ import annotations
 
 import enum
@@ -6,6 +6,7 @@ import logging
 import threading
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 
 from sigflow.graph import Connection
 from sigflow.metrics import MetricsCollector, MetricsTracker
@@ -54,11 +55,119 @@ class MasterClock:
         return int((self._now() - self._start_time) * 1000)
 
 
+# ---------------------------------------------------------------------------
+# Source ancestry analysis (static, at start())
+# ---------------------------------------------------------------------------
+
+def _port_ancestor_sources(
+    node_id: str, port_name: str,
+    connections: list[Connection], nodes: dict,
+) -> set[str]:
+    """Trace backward from node_id.port_name to find all feeding source nodes."""
+    sources: set[str] = set()
+    visited: set[tuple[str, str, str, str]] = set()
+    stack = [(node_id, port_name)]
+    while stack:
+        nid, pname = stack.pop()
+        for conn in connections:
+            if conn.dst_id == nid and conn.dst_port == pname:
+                edge = (conn.src_id, conn.src_port, conn.dst_id, conn.dst_port)
+                if edge in visited:
+                    continue
+                visited.add(edge)
+                if nodes[conn.src_id]._spec.kind == "source":
+                    sources.add(conn.src_id)
+                else:
+                    for c2 in connections:
+                        if c2.dst_id == conn.src_id:
+                            stack.append((conn.src_id, c2.dst_port))
+    return sources
+
+
+def _compute_source_ancestry(
+    nodes: dict, connections: list[Connection],
+) -> dict[str, str]:
+    """Determine matching strategy per node based on source ancestry.
+
+    Returns dict mapping node_id to strategy:
+    - "source": source node (no matching needed)
+    - "single": 0 or 1 connected input port
+    - "generation": all input ports trace to same source(s) -> match by frame_id
+    - "latest": input ports trace to different sources -> take latest per port
+    """
+    strategies: dict[str, str] = {}
+    for node_id, node in nodes.items():
+        if node._spec.kind == "source":
+            strategies[node_id] = "source"
+            continue
+        connected = node._connected_ports
+        if len(connected) <= 1:
+            strategies[node_id] = "single"
+            continue
+        per_port = [
+            _port_ancestor_sources(node_id, pname, connections, nodes)
+            for pname in connected
+        ]
+        if all(s == per_port[0] for s in per_port[1:]) and per_port[0]:
+            strategies[node_id] = "generation"
+        else:
+            strategies[node_id] = "latest"
+    return strategies
+
+
+# ---------------------------------------------------------------------------
+# Generation firing rules
+# ---------------------------------------------------------------------------
+
+def _check_fireable(
+    pending: dict[int, dict[str, Sample]], n_required: int, strategy: str,
+) -> tuple[int, dict[str, Sample]] | None:
+    """Find latest complete generation in pending map.
+
+    Returns (frame_id, fire_set) or None.
+    """
+    if not pending:
+        return None
+
+    if strategy == "single":
+        fid = max(pending)
+        return (fid, pending[fid])
+
+    if strategy == "generation":
+        for fid in sorted(pending, reverse=True):
+            if len(pending[fid]) >= n_required:
+                return (fid, pending[fid])
+        return None
+
+    # "latest": collect most recent sample per port
+    latest: dict[str, Sample] = {}
+    for fid in sorted(pending):
+        for port_name, sample in pending[fid].items():
+            latest[port_name] = sample
+    if len(latest) >= n_required:
+        return (max(pending), latest)
+    return None
+
+
+def _evict_stale(
+    pending: dict[int, dict[str, Sample]], fired_fid: int, n_required: int,
+) -> None:
+    """Remove fired entry and incomplete entries older than fired generation."""
+    pending.pop(fired_fid, None)
+    stale = [fid for fid in pending if fid < fired_fid and len(pending[fid]) < n_required]
+    for fid in stale:
+        del pending[fid]
+
+
+# ---------------------------------------------------------------------------
+# NodeInstance
+# ---------------------------------------------------------------------------
+
 _PARAM_COERCE = {"int": int, "float": float, "str": str, "bool": bool}
 
 
 class NodeInstance:
-    """Wraps a node function with threading, queues, and metrics."""
+    """Wraps a node function with generation-based pending map and metrics."""
 
     def __init__(self, node_id: str, spec: NodeSpec, config: dict, clock: MasterClock, pipeline: Pipeline):
         self.node_id = node_id
@@ -77,111 +186,29 @@ class NodeInstance:
         self._state: dict = {}
         self._clock = clock
         self._pipeline = pipeline
-        self._queues: dict[str, deque] = {
-            port.name: deque() for port in spec.inputs
-        }
+        self._pending: dict[int, dict[str, Sample]] = {}
+        self._match_strategy: str = "single"
         self._metrics: MetricsTracker | None = None
         self._thread: threading.Thread | None = None
         self._running = False
-        self._event = threading.Event()
-        self._next_frame_id: int = 0
         self._connected_ports: set[str] = set()
 
     def on_input(self, port_name: str, sample: Sample) -> None:
-        """Thread-safe: push sample into input deque and wake worker."""
-        if port_name in self._queues:
-            self._queues[port_name].append(sample)
-            self._event.set()
+        """Thread-safe: insert sample into pending map and notify scheduler."""
+        self._pending.setdefault(sample.frame_id, {})[port_name] = sample
+        self._pipeline._schedule_node(self)
 
-    def _process_queues(self) -> None:
-        """Dispatch to single-input or correlated multi-input processing."""
-        if len(self._connected_ports) > 1:
-            self._process_correlated()
-        else:
-            self._process_single()
-
-    def _process_single(self) -> None:
-        """Process one item from the first non-empty queue (single-input nodes)."""
-        for port_name, q in self._queues.items():
-            if not q:
-                continue
-            if self._pipeline._mode == PipelineMode.LIVE and not self._spec.lossless:
-                item = q.pop()
-                skipped = len(q)
-                q.clear()
-                if self._metrics and skipped > 0:
-                    self._metrics.record_skipped(skipped)
-            else:
-                item = q.popleft()
-            self._invoke(item)
-            return
-
-    def _process_correlated(self) -> None:
-        """Multi-input: consume items with matching frame_id across all connected ports."""
-        for port_name in self._connected_ports:
-            if not self._queues.get(port_name):
-                return
-
-        lossy = self._pipeline._mode == PipelineMode.LIVE and not self._spec.lossless
-
-        if lossy:
-            common_fids = None
-            for port_name in self._connected_ports:
-                q = self._queues[port_name]
-                port_fids = {item.frame_id for item in q}
-                if common_fids is None:
-                    common_fids = port_fids
-                else:
-                    common_fids &= port_fids
-
-            if not common_fids:
-                return
-
-            target_fid = max(common_fids)
-        else:
-            target_fid = max(self._queues[p][0].frame_id for p in self._connected_ports)
-
-        items = []
-        total_skipped = 0
-        for port_name in self._connected_ports:
-            q = self._queues[port_name]
-            while q and q[0].frame_id < target_fid:
-                q.popleft()
-                total_skipped += 1
-            if q and q[0].frame_id == target_fid:
-                items.append(q.popleft())
-
-        if lossy and self._metrics and total_skipped > 0:
-            self._metrics.record_skipped(total_skipped)
-
-        if len(items) != len(self._connected_ports):
-            return
-
+    def _invoke(self, items: dict[str, Sample]) -> None:
+        """Call the node function with one sample per input port, dispatch outputs."""
         t0 = time.perf_counter()
-        for item in items:
-            try:
+        try:
+            for item in items.values():
                 if self._spec.kind == "sink":
                     self._spec.func(item, state=self._state, config=self._config)
                 else:
                     result = self._spec.func(item, state=self._state, config=self._config)
                     if result:
                         self._pipeline._dispatch(self.node_id, result)
-            except Exception:
-                log.exception("node '%s' raised during correlated invoke", self.node_id)
-        elapsed_ms = (time.perf_counter() - t0) * 1000
-        if self._metrics:
-            self._metrics.record(elapsed_ms)
-
-    def _invoke(self, item: Sample) -> None:
-        """Call the node function and dispatch outputs."""
-        t0 = time.perf_counter()
-        try:
-            if self._spec.kind == "sink":
-                self._spec.func(item, state=self._state, config=self._config)
-            else:
-                result = self._spec.func(item, state=self._state, config=self._config)
-                if result:
-                    self._pipeline._dispatch(self.node_id, result)
         except Exception:
             log.exception("node '%s' raised during invoke", self.node_id)
             return
@@ -190,7 +217,7 @@ class NodeInstance:
             self._metrics.record(elapsed_ms)
 
     def _run_source_loop(self) -> None:
-        """Blocking loop for source nodes."""
+        """Blocking loop for source nodes. Stamps monotonic frame_id on all outputs."""
         log.debug("source loop started: %s", self.node_id)
         consecutive_errors = 0
         while self._running:
@@ -207,8 +234,8 @@ class NodeInstance:
                 continue
             consecutive_errors = 0
             if result:
-                fid = self._next_frame_id
-                self._next_frame_id += 1
+                fid = self._state.get("_frame_counter", 0)
+                self._state["_frame_counter"] = fid + 1
                 for sample in result.values():
                     sample.frame_id = fid
                 elapsed_ms = (time.perf_counter() - t0) * 1000
@@ -217,39 +244,18 @@ class NodeInstance:
                 self._pipeline._dispatch(self.node_id, result)
         log.debug("source loop exited: %s", self.node_id)
 
-    def _run_worker_loop(self) -> None:
-        """Event-driven loop for process/sink nodes."""
-        while self._running:
-            self._event.wait(timeout=0.1)
-            self._event.clear()
-            if not self._running:
-                break
-            has_items = True
-            while has_items and self._running:
-                has_items = False
-                for q in self._queues.values():
-                    if q:
-                        has_items = True
-                        break
-                if has_items:
-                    self._process_queues()
-
     def start(self) -> None:
+        """Start source node thread. Non-source nodes don't get threads."""
         self._running = True
         if self._spec.kind == "source":
             self._thread = threading.Thread(
                 target=self._run_source_loop, daemon=True, name=f"sigflow-{self.node_id}"
             )
-        else:
-            self._thread = threading.Thread(
-                target=self._run_worker_loop, daemon=True, name=f"sigflow-{self.node_id}"
-            )
-        self._thread.start()
-        log.debug("started thread for %s node '%s'", self._spec.kind, self.node_id)
+            self._thread.start()
+            log.debug("started source thread for '%s'", self.node_id)
 
     def stop(self) -> None:
         self._running = False
-        self._event.set()
         if self._thread:
             self._thread.join(timeout=3.0)
             if self._thread.is_alive():
@@ -266,11 +272,12 @@ class NodeInstance:
             self._spec.cleanup_func(self._state, self._config)
 
     def drain(self) -> None:
-        """Process all remaining queued items in FIFO order."""
-        for q in self._queues.values():
-            while q:
-                item = q.popleft()
-                self._invoke(item)
+        """Process all remaining pending entries in frame_id order (ascending)."""
+        if not self._pending:
+            return
+        for fid in sorted(self._pending):
+            self._invoke(self._pending[fid])
+        self._pending.clear()
 
     def update_config(self, key: str, value) -> None:
         """Hot-update a config value (thread-safe for simple types under GIL)."""
@@ -283,11 +290,18 @@ class NodeInstance:
         self._config[key] = value
 
     def queue_depth(self) -> int:
-        return sum(len(q) for q in self._queues.values())
+        return len(self._pending)
 
+    def backlog_depth(self) -> int:
+        return sum(len(ports) for ports in self._pending.values())
+
+
+# ---------------------------------------------------------------------------
+# Pipeline
+# ---------------------------------------------------------------------------
 
 class Pipeline:
-    """Qt-free DAG execution engine."""
+    """Reactive DAG execution engine: sources push, pool executes downstream."""
 
     def __init__(self, max_workers: int = 4):
         self._nodes: dict[str, NodeInstance] = {}
@@ -297,6 +311,12 @@ class Pipeline:
         self._mode = PipelineMode.STOPPED
         self._max_workers = max_workers
         self._recorder: SessionRecorder | None = None
+        # Reactive scheduling
+        self._adjacency: dict[tuple[str, str], list[Connection]] = {}
+        self._pool: ThreadPoolExecutor | None = None
+        self._in_flight: set[str] = set()
+        self._lock = threading.Lock()
+        self._condition = threading.Condition(self._lock)
 
     def add_node(self, node_id: str, node_type: str, config: dict) -> None:
         spec = registry_get(node_type)
@@ -335,50 +355,136 @@ class Pipeline:
         ))
         log.info("connected %s.%s -> %s.%s", src_id, src_port, dst_id, dst_port)
 
+    def _build_adjacency(self) -> None:
+        """Build precomputed adjacency list: (src_id, port_name) -> [Connection]."""
+        self._adjacency.clear()
+        for conn in self._connections:
+            key = (conn.src_id, conn.src_port)
+            self._adjacency.setdefault(key, []).append(conn)
+
     def _dispatch(self, src_id: str, outputs: dict[str, Sample]) -> None:
         """Route outputs from a node to all connected downstream nodes."""
         for port_name, sample in outputs.items():
             if self._recorder and self._nodes[src_id]._config.get("recording"):
                 self._recorder.write(sample)
-            for conn in self._connections:
-                if conn.src_id == src_id and conn.src_port == port_name:
-                    copy = sample.replace(metadata=dict(sample.metadata))
-                    self._nodes[conn.dst_id].on_input(conn.dst_port, copy)
+            for conn in self._adjacency.get((src_id, port_name), ()):
+                copy = sample.replace(metadata=dict(sample.metadata))
+                self._nodes[conn.dst_id].on_input(conn.dst_port, copy)
+
+    def _schedule_node(self, node: NodeInstance) -> None:
+        """Check if a non-source node is fireable and submit to pool."""
+        if self._mode != PipelineMode.LIVE:
+            return
+        with self._lock:
+            if node.node_id in self._in_flight:
+                return
+            n_required = len(node._connected_ports)
+            if n_required == 0:
+                return
+            result = _check_fireable(node._pending, n_required, node._match_strategy)
+            if result is None:
+                return
+            fid, fire_set = result
+            if node._match_strategy == "latest":
+                node._pending.clear()
+            else:
+                _evict_stale(node._pending, fid, n_required)
+            self._in_flight.add(node.node_id)
+        # Submit outside lock
+        if self._pool:
+            self._pool.submit(self._execute_node, node, fire_set)
+
+    def _execute_node(self, node: NodeInstance, fire_set: dict[str, Sample]) -> None:
+        """Run in pool thread: invoke func, dispatch outputs, re-schedule."""
+        try:
+            node._invoke(fire_set)
+        finally:
+            with self._lock:
+                self._in_flight.discard(node.node_id)
+            # Re-check: new data may have arrived while we were executing
+            self._schedule_node(node)
+
+    def _topological_sort(self) -> list[str]:
+        """Kahn's algorithm on the connection graph. Returns node_ids in topo order."""
+        in_degree: dict[str, int] = {nid: 0 for nid in self._nodes}
+        children: dict[str, set[str]] = {nid: set() for nid in self._nodes}
+        for conn in self._connections:
+            if conn.dst_id in in_degree:
+                in_degree[conn.dst_id] += 1
+            if conn.src_id in children:
+                children[conn.src_id].add(conn.dst_id)
+
+        queue = deque(nid for nid, deg in in_degree.items() if deg == 0)
+        result = []
+        while queue:
+            nid = queue.popleft()
+            result.append(nid)
+            for child in children.get(nid, ()):
+                in_degree[child] -= 1
+                if in_degree[child] == 0:
+                    queue.append(child)
+        return result
+
+    def _drain_backlogs(self) -> None:
+        """Drain all backlogs in topological order."""
+        order = self._topological_sort()
+        for node_id in order:
+            node = self._nodes[node_id]
+            if node._spec.kind != "source":
+                node.drain()
 
     def start(self) -> None:
         self._clock.start()
         self._mode = PipelineMode.LIVE
 
+        # Build adjacency list
+        self._build_adjacency()
+
+        # Track which ports are actually connected
         for node_id, node in self._nodes.items():
             node._connected_ports = {c.dst_port for c in self._connections if c.dst_id == node_id}
 
+        # Compute matching strategies from source ancestry
+        strategies = _compute_source_ancestry(self._nodes, self._connections)
+        for node_id, strategy in strategies.items():
+            self._nodes[node_id]._match_strategy = strategy
+
+        # Init all nodes
         for node in self._nodes.values():
             node.init()
 
-        for node in self._nodes.values():
-            if node._spec.kind != "source":
-                node.start()
+        # Start thread pool for non-source nodes
+        self._pool = ThreadPoolExecutor(
+            max_workers=self._max_workers,
+            thread_name_prefix="sigflow-pool",
+        )
+        self._in_flight.clear()
 
+        # Start source threads last (they push data)
         for node in self._nodes.values():
             if node._spec.kind == "source":
                 node.start()
 
-        log.info("pipeline started: %d nodes, %d connections",
-                 len(self._nodes), len(self._connections))
+        log.info("pipeline started: %d nodes, %d connections, pool=%d",
+                 len(self._nodes), len(self._connections), self._max_workers)
 
     def stop(self) -> None:
         log.info("stopping pipeline ...")
+        # Stop sources first
         for node in self._nodes.values():
             if node._spec.kind == "source":
                 node.stop()
 
         time.sleep(0.05)
 
+        # Drain backlogs in topological order
         self._mode = PipelineMode.DRAINING
-        for node in self._nodes.values():
-            if node._spec.kind != "source":
-                node.stop()
-                node.drain()
+        self._drain_backlogs()
+
+        # Shutdown pool
+        if self._pool:
+            self._pool.shutdown(wait=True)
+            self._pool = None
 
         if self._recorder:
             self._recorder.finalize()
@@ -406,8 +512,7 @@ class Pipeline:
 
     def drain(self) -> None:
         self._mode = PipelineMode.DRAINING
-        for node in self._nodes.values():
-            node.drain()
+        self._drain_backlogs()
 
     def update_node_config(self, node_id: str, key: str, value) -> None:
         """Hot-update a config value on a running node."""
@@ -419,7 +524,10 @@ class Pipeline:
         snapshots = {}
         for node_id, node in self._nodes.items():
             if node._metrics:
-                snapshots[node_id] = node._metrics.snapshot(queue_depth=node.queue_depth())
+                snapshots[node_id] = node._metrics.snapshot(
+                    queue_depth=node.queue_depth(),
+                    backlog_depth=node.backlog_depth(),
+                )
         return snapshots
 
     @classmethod

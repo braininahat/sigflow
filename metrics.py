@@ -16,7 +16,7 @@ class NodeMetrics:
     peak_process_ms: float = 0.0
     queue_depth: int = 0
     items_processed: int = 0
-    items_skipped: int = 0
+    backlog_depth: int = 0
     last_update: float = 0.0
 
 
@@ -29,7 +29,6 @@ class MetricsTracker:
         self._lock = threading.Lock()
         self._times: deque[tuple[float, float]] = deque()  # (timestamp, elapsed_ms)
         self._items_processed = 0
-        self._items_skipped = 0
 
     def record(self, elapsed_ms: float) -> None:
         now = time.monotonic()
@@ -37,16 +36,12 @@ class MetricsTracker:
             self._times.append((now, elapsed_ms))
             self._items_processed += 1
 
-    def record_skipped(self, count: int) -> None:
-        with self._lock:
-            self._items_skipped += count
-
     def _prune(self, now: float) -> None:
         cutoff = now - self._window_sec
         while self._times and self._times[0][0] < cutoff:
             self._times.popleft()
 
-    def snapshot(self, queue_depth: int = 0) -> NodeMetrics:
+    def snapshot(self, queue_depth: int = 0, backlog_depth: int = 0) -> NodeMetrics:
         now = time.monotonic()
         with self._lock:
             self._prune(now)
@@ -55,8 +50,8 @@ class MetricsTracker:
                 return NodeMetrics(
                     node_id=self._node_id,
                     queue_depth=queue_depth,
+                    backlog_depth=backlog_depth,
                     items_processed=self._items_processed,
-                    items_skipped=self._items_skipped,
                     last_update=now,
                 )
             elapsed_values = [t[1] for t in self._times]
@@ -66,8 +61,8 @@ class MetricsTracker:
                 avg_process_ms=sum(elapsed_values) / count,
                 peak_process_ms=max(elapsed_values),
                 queue_depth=queue_depth,
+                backlog_depth=backlog_depth,
                 items_processed=self._items_processed,
-                items_skipped=self._items_skipped,
                 last_update=now,
             )
 

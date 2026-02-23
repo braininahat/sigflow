@@ -32,7 +32,6 @@ class NodeSpec:
     init_func: Callable | None = None
     cleanup_func: Callable | None = None
     params: list[Param] = field(default_factory=list)
-    lossless: bool = False  # True = FIFO even in LIVE mode (recording sinks)
 
 
 def _make_decorator(kind: str, *, require_inputs: bool, require_outputs: bool):
@@ -44,7 +43,6 @@ def _make_decorator(kind: str, *, require_inputs: bool, require_outputs: bool):
         outputs: list[Port] | None = None,
         category: str = "",
         params: list[Param] | None = None,
-        lossless: bool = False,
     ):
         inputs = inputs or []
         outputs = outputs or []
@@ -64,7 +62,6 @@ def _make_decorator(kind: str, *, require_inputs: bool, require_outputs: bool):
                 category=category,
                 func=func,
                 params=list(params),
-                lossless=lossless,
             )
             func.spec = spec
 

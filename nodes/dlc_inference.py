@@ -98,7 +98,7 @@ def _load_model(state, config):
     state["joint_names"] = preprocess_cfg.get("joint_names", [])
 
     model_path = config["model_path"]
-    providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+    providers = ['CPUExecutionProvider']
     session = ort.InferenceSession(model_path, providers=providers)
     state["session"] = session
     state["input_name"] = session.get_inputs()[0].name
