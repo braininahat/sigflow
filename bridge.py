@@ -32,7 +32,7 @@ class EditorBridge:
             node_type = type(node)._REGISTRY_TYPE
             config = {}
             for prop_name, prop_val in node.model.custom_properties.items():
-                if not prop_name.startswith("_") and prop_name != "recording":
+                if not prop_name.startswith("_"):
                     config[prop_name] = prop_val
 
             nodes.append(NodeDef(id=self.node_clean_name(node), type=node_type, config=config))
@@ -116,9 +116,14 @@ class EditorBridge:
             visual_cls = f"{identifier}.Visual_{node_def.type}"
             visual_node = self._node_graph.create_node(visual_cls, name=node_def.id)
             visual_node.set_pos(i * 250, 0)
-            # Restore config values to node properties
+            # Restore config values to node properties (coerce types for Qt widgets)
+            param_types = {p.name: p.type for p in spec.params}
+            _coerce = {"int": int, "float": float, "str": str, "bool": bool}
             for key, val in node_def.config.items():
                 if visual_node.has_property(key):
+                    coerce = _coerce.get(param_types.get(key))
+                    if coerce and not isinstance(val, coerce):
+                        val = coerce(val)
                     visual_node.set_property(key, val)
             node_map[node_def.id] = visual_node
             log.debug("created visual node '%s' (type=%s)", node_def.id, node_def.type)
