@@ -3,6 +3,7 @@
 from sigflow.nodes import webcam_source  # noqa: F401
 from sigflow.nodes import cv2_display  # noqa: F401
 from sigflow.nodes import crop  # noqa: F401
+from sigflow.nodes import flip  # noqa: F401
 from sigflow.nodes import audio_source  # noqa: F401
 from sigflow.nodes import spectrogram  # noqa: F401
 from sigflow.nodes import canvas_display  # noqa: F401
@@ -11,3 +12,4 @@ from sigflow.nodes import keypoints_overlay  # noqa: F401
 from sigflow.nodes import scrcpy_screen  # noqa: F401
 from sigflow.nodes import scrcpy_camera  # noqa: F401
 from sigflow.nodes import scrcpy_mic  # noqa: F401
+from sigflow.nodes import sonostar_source  # noqa: F401
