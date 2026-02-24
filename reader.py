@@ -29,6 +29,7 @@ class StreamInfo:
     channel_format: str
     channel_count: int
     nominal_srate: float
+    node_id: str | None = None
     # Video-specific
     filename: str | None = None
     width: int | None = None
@@ -56,6 +57,13 @@ class SessionReader:
         xdf_path = self._dir / "streams.xdf"
         if xdf_path.exists():
             self._xdf_streams, _ = pyxdf.load_xdf(str(xdf_path))
+            for s in self._xdf_streams:
+                info = s["info"]
+                name = info["name"][0] if isinstance(info["name"], list) else info["name"]
+                n_samples = len(s.get("time_stamps", []))
+                stype = info.get("type", ["?"])
+                stype = stype[0] if isinstance(stype, list) else stype
+                log.debug("stream: %s (%s, %d samples)", name, stype, n_samples)
 
         # Build stream inventory from XDF + metadata
         xdf_by_name = {s["info"]["name"][0]: s for s in self._xdf_streams}
@@ -84,6 +92,7 @@ class SessionReader:
                     channel_format="double64",
                     channel_count=1,
                     nominal_srate=0,
+                    node_id=meta_entry.get("node_id"),
                     filename=meta_entry.get("filename"),
                     width=meta_entry.get("width"),
                     height=meta_entry.get("height"),
@@ -112,6 +121,7 @@ class SessionReader:
                     channel_format=ch_format,
                     channel_count=ch_count,
                     nominal_srate=nom_srate,
+                    node_id=meta_entry.get("node_id"),
                 ))
 
         log.info("loaded session: %s (%d streams)", self._dir, len(self._stream_infos))
@@ -153,6 +163,8 @@ class SessionReader:
             return None
         cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
         ok, frame = cap.read()
+        if not ok:
+            log.warning("video frame read failed: %s frame=%d", source_id, frame_index)
         return frame if ok else None
 
     def get_video_frame_at_time(self, source_id: str, timestamp: float) -> np.ndarray | None:
@@ -164,6 +176,8 @@ class SessionReader:
         try:
             ts, _ = self.get_time_series(info.stream_id)
         except KeyError:
+            log.warning("video seek failed: no timestamp stream for %s (stream_id=%s)",
+                        source_id, info.stream_id)
             return None
         if len(ts) == 0:
             return None
@@ -179,9 +193,11 @@ class SessionReader:
             return None
         path = self._dir / info.filename
         if not path.exists():
+            log.warning("cannot open video: %s (file not found)", path)
             return None
         cap = cv2.VideoCapture(str(path))
         if not cap.isOpened():
+            log.warning("cannot open video: %s (cv2 open failed)", path)
             return None
         self._video_caps[source_id] = cap
         return cap

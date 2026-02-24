@@ -1,6 +1,10 @@
 """Generic 2D crop process node."""
+import logging
+
 from sigflow.node import process_node, Param
 from sigflow.types import Port, TimeSeries2D
+
+log = logging.getLogger(__name__)
 
 
 @process_node(

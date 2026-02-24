@@ -16,7 +16,8 @@ def _discover_audio_inputs():
     """Return {name: index} for available audio input devices."""
     try:
         return {d["name"]: i for i, d in enumerate(sd.query_devices()) if d["max_input_channels"] > 0}
-    except Exception:
+    except Exception as e:
+        log.warning("audio device discovery failed: %s", e)
         return {}
 
 
@@ -68,6 +69,8 @@ def microphone(*, state, config, clock):
         state["sample_rate"] = sample_rate
 
     data, overflowed = state["stream"].read(chunk_size)
+    if overflowed:
+        log.warning("audio overflow (device=%s)", device)
     return {"audio": Sample(
         source_id=config["source_id"],
         lsl_timestamp=clock.lsl_now(),

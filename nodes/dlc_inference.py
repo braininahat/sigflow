@@ -1,7 +1,7 @@
-"""DeepLabCut ONNX inference process node.
+"""DeepLabCut ONNX inference process nodes.
 
-Generic DLC inference that works for any DLC model (lips, tongue, etc.)
-based on the model path and preprocessing config YAML.
+Two named palette entries — dlc_lips and dlc_tongue — with shared
+preprocessing/postprocessing and a common inference body.
 
 Preprocessing matches the C++ InferenceEngine implementation:
 1. BGR uint8 → float32
@@ -13,6 +13,8 @@ Postprocessing: heatmap peak detection via cv2.minMaxLoc,
 coordinate scaling by stride.
 """
 import logging
+
+import time
 
 import cv2
 import numpy as np
@@ -96,6 +98,7 @@ def _load_model(state, config):
     state["stride"] = int(preprocess_cfg.get("stride", 8))
     state["num_joints"] = int(preprocess_cfg["num_joints"])
     state["joint_names"] = preprocess_cfg.get("joint_names", [])
+    state["model_input_width"] = int(preprocess_cfg.get("model_input_width", 0))
 
     model_path = config["model_path"]
     providers = ['CPUExecutionProvider']
@@ -110,30 +113,48 @@ def _load_model(state, config):
     )
 
 
-@process_node(
-    name="dlc_inference",
-    inputs=[Port("frame", TimeSeries2D)],
-    outputs=[Port("frame", TimeSeries2D), Port("keypoints", Keypoints)],
-    category="inference",
-    params=[
-        Param("model_path", "str", "weights/lips.onnx", label="Model Path"),
-        Param("config_path", "str", "weights/lips.preprocessing.yaml", label="Config Path"),
-    ],
-)
-def dlc_inference(item, *, state, config):
+def _dlc_inference(item, *, state, config):
     if "session" not in state:
-        _load_model(state, config)
+        try:
+            _load_model(state, config)
+        except Exception:
+            log.error("failed to load DLC model: %s", config.get("model_path", "?"))
+            raise
 
     frame = item.data
     stride = state["stride"]
     num_joints = state["num_joints"]
+    model_input_width = state.get("model_input_width", 0)
 
+    orig_h, orig_w = frame.shape[:2]
+
+    # Resize to model input width if configured (e.g. tongue model needs 320px wide)
+    if model_input_width > 0 and orig_w != model_input_width:
+        aspect = orig_w / orig_h
+        target_w = model_input_width
+        target_h = ((int(target_w / aspect) + stride - 1) // stride) * stride
+        frame = cv2.resize(frame, (target_w, target_h))
+
+    t0 = time.perf_counter()
     tensor = preprocess_frame(frame, stride)
     outputs = state["session"].run(None, {state["input_name"]: tensor})
     heatmaps = outputs[0]  # [1, H/stride, W/stride, num_joints]
     locref = outputs[1] if len(outputs) > 1 else None  # [1, H/s, W/s, J*2]
 
     keypoints = postprocess_heatmaps(heatmaps, stride, num_joints, locref)
+
+    # Remap keypoints back to original frame coordinates
+    if model_input_width > 0 and orig_w != model_input_width:
+        scale_x = orig_w / frame.shape[1]
+        scale_y = orig_h / frame.shape[0]
+        keypoints[:, 0] *= scale_x
+        keypoints[:, 1] *= scale_y
+
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+    state.setdefault("_inference_times", []).append(elapsed_ms)
+    if len(state["_inference_times"]) % 100 == 0:
+        avg = sum(state["_inference_times"][-100:]) / 100
+        log.debug("dlc inference: avg %.1fms over last 100 frames", avg)
 
     return {
         "keypoints": item.replace(
@@ -142,8 +163,36 @@ def dlc_inference(item, *, state, config):
             metadata={
                 **item.metadata,
                 "joint_names": state["joint_names"],
-                "frame_shape": frame.shape[:2],
+                "frame_shape": (orig_h, orig_w),
             },
         ),
         "frame": item,
     }
+
+
+@process_node(
+    name="dlc_lips",
+    inputs=[Port("frame", TimeSeries2D)],
+    outputs=[Port("frame", TimeSeries2D), Port("keypoints", Keypoints)],
+    category="inference",
+    params=[
+        Param("model_path", "str", "weights/lips.onnx", label="Model Path"),
+        Param("config_path", "str", "weights/lips.preprocessing.yaml", label="Config Path"),
+    ],
+)
+def dlc_lips(item, *, state, config):
+    return _dlc_inference(item, state=state, config=config)
+
+
+@process_node(
+    name="dlc_tongue",
+    inputs=[Port("frame", TimeSeries2D)],
+    outputs=[Port("frame", TimeSeries2D), Port("keypoints", Keypoints)],
+    category="inference",
+    params=[
+        Param("model_path", "str", "weights/tongue.onnx", label="Model Path"),
+        Param("config_path", "str", "weights/tongue.preprocessing.yaml", label="Config Path"),
+    ],
+)
+def dlc_tongue(item, *, state, config):
+    return _dlc_inference(item, state=state, config=config)

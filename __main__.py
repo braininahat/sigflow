@@ -68,7 +68,7 @@ def cmd_list_nodes(args):
 
     nodes = all_nodes()
     if not nodes:
-        print("No nodes registered.")
+        log.info("No nodes registered.")
         return
 
     by_category: dict[str, list] = {}
@@ -76,16 +76,16 @@ def cmd_list_nodes(args):
         by_category.setdefault(spec.category, []).append(spec)
 
     for category, specs in sorted(by_category.items()):
-        print(f"\n[{category}]")
+        log.info("[%s]", category)
         for spec in sorted(specs, key=lambda s: s.name):
             inputs = ", ".join(f"{p.name}:{p.type.__name__}" for p in spec.inputs)
             outputs = ", ".join(f"{p.name}:{p.type.__name__}" for p in spec.outputs)
             kind_tag = spec.kind.upper()
-            print(f"  {spec.name} ({kind_tag})")
+            log.info("  %s (%s)", spec.name, kind_tag)
             if inputs:
-                print(f"    inputs:  {inputs}")
+                log.info("    inputs:  %s", inputs)
             if outputs:
-                print(f"    outputs: {outputs}")
+                log.info("    outputs: %s", outputs)
 
 
 def main():

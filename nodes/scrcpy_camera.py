@@ -39,6 +39,7 @@ def scrcpy_camera(*, state, config, clock):
 
     ret, frame = state["cap"].read()
     if ret:
+        state["_drop_count"] = 0
         return {"frame": Sample(
             source_id=config["source_id"],
             lsl_timestamp=clock.lsl_now(),
@@ -47,6 +48,12 @@ def scrcpy_camera(*, state, config, clock):
             metadata={},
             port_type=CameraFrame,
         )}
+    drops = state.get("_drop_count", 0) + 1
+    state["_drop_count"] = drops
+    if drops == 1:
+        log.warning("scrcpy_camera frame drop")
+    elif drops % 100 == 0:
+        log.warning("scrcpy_camera frame drops: %d consecutive", drops)
     return None
 
 

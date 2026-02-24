@@ -35,6 +35,7 @@ def face_mesh(item, *, state, config):
     result = state["landmarker"].detect(mp_image)
 
     if not result.face_landmarks:
+        log.debug("no face detected")
         return None
 
     lms = result.face_landmarks[0]

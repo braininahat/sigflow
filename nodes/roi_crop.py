@@ -3,10 +3,14 @@
 Multi-input node: buffers a frame and ROI in state,
 crops the frame to the ROI bounds when both are available.
 """
+import logging
+
 import numpy as np
 
 from sigflow.node import process_node, Param
 from sigflow.types import Port, TimeSeries2D, ROI
+
+log = logging.getLogger(__name__)
 
 
 @process_node(
@@ -36,6 +40,7 @@ def roi_crop(item, *, state, config):
     if "roi" in state:
         x, y, w, h = state["roi"].data
     else:
+        log.debug("roi_crop: using fallback ROI (no ROI received yet)")
         x = config["fallback_x"]
         y = config["fallback_y"]
         w = config["fallback_w"]

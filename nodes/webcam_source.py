@@ -24,6 +24,7 @@ def webcam(*, state, config, clock):
         state["cap"].set(cv2.CAP_PROP_BUFFERSIZE, 1)
     ret, frame = state["cap"].read()
     if ret:
+        state["_drop_count"] = 0
         return {"frame": Sample(
             source_id=config["source_id"],
             lsl_timestamp=clock.lsl_now(),
@@ -32,6 +33,12 @@ def webcam(*, state, config, clock):
             metadata={},
             port_type=CameraFrame,
         )}
+    drops = state.get("_drop_count", 0) + 1
+    state["_drop_count"] = drops
+    if drops == 1:
+        log.warning("webcam frame drop (device=%d)", config["device"])
+    elif drops % 100 == 0:
+        log.warning("webcam frame drops: %d consecutive (device=%d)", drops, config["device"])
     return None
 
 

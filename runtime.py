@@ -6,6 +6,7 @@ import logging
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
 from sigflow.graph import Connection
@@ -112,6 +113,8 @@ def _compute_source_ancestry(
             strategies[node_id] = "generation"
         else:
             strategies[node_id] = "latest"
+    for node_id, strategy in strategies.items():
+        log.debug("match strategy: %s → %s", node_id, strategy)
     return strategies
 
 
@@ -131,11 +134,13 @@ def _check_fireable(
 
     if strategy == "single":
         fid = max(pending)
+        log.debug("fireable: single fid=%d", fid)
         return (fid, pending[fid])
 
     if strategy == "generation":
         for fid in sorted(pending, reverse=True):
             if len(pending[fid]) >= n_required:
+                log.debug("fireable: generation fid=%d (%d/%d ports)", fid, len(pending[fid]), n_required)
                 return (fid, pending[fid])
         return None
 
@@ -145,6 +150,7 @@ def _check_fireable(
         for port_name, sample in pending[fid].items():
             latest[port_name] = sample
     if len(latest) >= n_required:
+        log.debug("fireable: latest fid=%d (%d/%d ports)", max(pending), len(latest), n_required)
         return (max(pending), latest)
     return None
 
@@ -155,6 +161,8 @@ def _evict_stale(
     """Remove fired entry and incomplete entries older than fired generation."""
     pending.pop(fired_fid, None)
     stale = [fid for fid in pending if fid < fired_fid and len(pending[fid]) < n_required]
+    if stale:
+        log.debug("evicted %d stale entries from pending (fired fid=%d)", len(stale), fired_fid)
     for fid in stale:
         del pending[fid]
 
@@ -195,11 +203,13 @@ class NodeInstance:
 
     def on_input(self, port_name: str, sample: Sample) -> None:
         """Thread-safe: insert sample into pending map and notify scheduler."""
+        log.debug("on_input: %s.%s fid=%d (pending=%d)", self.node_id, port_name, sample.frame_id, len(self._pending))
         self._pending.setdefault(sample.frame_id, {})[port_name] = sample
         self._pipeline._schedule_node(self)
 
     def _invoke(self, items: dict[str, Sample]) -> None:
         """Call the node function with one sample per input port, dispatch outputs."""
+        log.debug("invoke: %s (%d items)", self.node_id, len(items))
         t0 = time.perf_counter()
         try:
             for item in items.values():
@@ -224,24 +234,23 @@ class NodeInstance:
             t0 = time.perf_counter()
             try:
                 result = self._spec.func(state=self._state, config=self._config, clock=self._clock)
+                consecutive_errors = 0
+                if result:
+                    fid = self._state.get("_frame_counter", 0)
+                    self._state["_frame_counter"] = fid + 1
+                    for sample in result.values():
+                        sample.frame_id = fid
+                    elapsed_ms = (time.perf_counter() - t0) * 1000
+                    if self._metrics:
+                        self._metrics.record(elapsed_ms)
+                    self._pipeline._dispatch(self.node_id, result)
             except Exception:
                 consecutive_errors += 1
                 if consecutive_errors >= 3:
                     log.error("source '%s' failed %d times, stopping", self.node_id, consecutive_errors)
                     break
-                log.exception("source '%s' raised during capture", self.node_id)
+                log.exception("source '%s' raised", self.node_id)
                 time.sleep(0.5)
-                continue
-            consecutive_errors = 0
-            if result:
-                fid = self._state.get("_frame_counter", 0)
-                self._state["_frame_counter"] = fid + 1
-                for sample in result.values():
-                    sample.frame_id = fid
-                elapsed_ms = (time.perf_counter() - t0) * 1000
-                if self._metrics:
-                    self._metrics.record(elapsed_ms)
-                self._pipeline._dispatch(self.node_id, result)
         log.debug("source loop exited: %s", self.node_id)
 
     def start(self) -> None:
@@ -288,6 +297,7 @@ class NodeInstance:
         if coerce and not isinstance(value, coerce):
             value = coerce(value)
         self._config[key] = value
+        log.info("config: %s.%s = %r", self.node_id, key, value)
 
     def queue_depth(self) -> int:
         return len(self._pending)
@@ -311,6 +321,7 @@ class Pipeline:
         self._mode = PipelineMode.STOPPED
         self._max_workers = max_workers
         self._recorder: SessionRecorder | None = None
+        self.on_sample: Callable[[str, str, Sample], None] | None = None
         # Reactive scheduling
         self._adjacency: dict[tuple[str, str], list[Connection]] = {}
         self._pool: ThreadPoolExecutor | None = None
@@ -335,6 +346,7 @@ class Pipeline:
                 src_port_type = port.type
                 break
         if src_port_type is None:
+            log.warning("connect: node '%s' has no output port '%s'", src_id, src_port)
             raise ValueError(f"Node '{src_id}' has no output port '{src_port}'")
 
         dst_port_type = None
@@ -343,9 +355,13 @@ class Pipeline:
                 dst_port_type = port.type
                 break
         if dst_port_type is None:
+            log.warning("connect: node '%s' has no input port '%s'", dst_id, dst_port)
             raise ValueError(f"Node '{dst_id}' has no input port '{dst_port}'")
 
         if not compatible(src_port_type, dst_port_type):
+            log.warning("connect: incompatible ports %s.%s (%s) → %s.%s (%s)",
+                        src_id, src_port, src_port_type.__name__,
+                        dst_id, dst_port, dst_port_type.__name__)
             raise IncompatiblePortError(
                 f"Cannot connect {src_port_type.__name__} to {dst_port_type.__name__}"
             )
@@ -365,9 +381,16 @@ class Pipeline:
     def _dispatch(self, src_id: str, outputs: dict[str, Sample]) -> None:
         """Route outputs from a node to all connected downstream nodes."""
         for port_name, sample in outputs.items():
+            downstream = self._adjacency.get((src_id, port_name), ())
             if self._recorder and self._nodes[src_id]._config.get("recording"):
-                self._recorder.write(sample)
-            for conn in self._adjacency.get((src_id, port_name), ()):
+                self._recorder.write(sample, node_id=src_id)
+            if self.on_sample:
+                try:
+                    self.on_sample(src_id, port_name, sample)
+                except Exception:
+                    log.exception("on_sample callback raised for %s.%s", src_id, port_name)
+            log.debug("dispatch: %s.%s → %d downstream (fid=%d)", src_id, port_name, len(downstream), sample.frame_id)
+            for conn in downstream:
                 copy = sample.replace(metadata=dict(sample.metadata))
                 self._nodes[conn.dst_id].on_input(conn.dst_port, copy)
 
@@ -390,6 +413,7 @@ class Pipeline:
             else:
                 _evict_stale(node._pending, fid, n_required)
             self._in_flight.add(node.node_id)
+        log.debug("schedule: %s → fireable (fid=%d)", node.node_id, fid)
         # Submit outside lock
         if self._pool:
             self._pool.submit(self._execute_node, node, fire_set)
@@ -401,6 +425,7 @@ class Pipeline:
         finally:
             with self._lock:
                 self._in_flight.discard(node.node_id)
+            log.debug("executed: %s", node.node_id)
             # Re-check: new data may have arrived while we were executing
             self._schedule_node(node)
 
@@ -431,6 +456,8 @@ class Pipeline:
         for node_id in order:
             node = self._nodes[node_id]
             if node._spec.kind != "source":
+                if node._pending:
+                    log.debug("draining %s: %d pending", node_id, len(node._pending))
                 node.drain()
 
     def start(self) -> None:
@@ -448,6 +475,8 @@ class Pipeline:
         strategies = _compute_source_ancestry(self._nodes, self._connections)
         for node_id, strategy in strategies.items():
             self._nodes[node_id]._match_strategy = strategy
+            log.debug("strategy: %s → %s (ports=%s)", node_id, strategy,
+                      self._nodes[node_id]._connected_ports)
 
         # Init all nodes
         for node in self._nodes.values():
@@ -496,10 +525,18 @@ class Pipeline:
         self._mode = PipelineMode.STOPPED
         log.info("pipeline stopped")
 
-    def start_recording(self, output_dir="recordings", video_fps=30, video_codec="mp4v") -> None:
+    def start_recording(self, output_dir="recordings", video_fps=30,
+                        on_sample=None) -> None:
         """Start recording outputs from nodes with recording=True."""
-        self._recorder = SessionRecorder(output_dir, video_fps, video_codec)
-        log.info("recording started (output_dir=%s)", output_dir)
+        self._recorder = SessionRecorder(output_dir, video_fps,
+                                         on_sample=on_sample)
+        recording_nodes = [nid for nid, n in self._nodes.items()
+                           if n._config.get("recording")]
+        log.info("recording started: output_dir=%s, on_sample=%s, recording_nodes=%s",
+                 output_dir, on_sample is not None, recording_nodes)
+        if not recording_nodes:
+            log.warning("recording started but NO nodes have recording=True "
+                        "— nothing will be recorded")
 
     def stop_recording(self):
         """Stop recording and finalize the session. Returns session dir Path or None."""
@@ -519,6 +556,8 @@ class Pipeline:
         node = self._nodes.get(node_id)
         if node:
             node.update_config(key, value)
+        else:
+            log.warning("update_node_config: node '%s' not in pipeline", node_id)
 
     def metrics_snapshot(self) -> dict:
         snapshots = {}

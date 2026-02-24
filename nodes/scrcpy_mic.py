@@ -71,6 +71,10 @@ def scrcpy_mic(*, state, config, clock):
     if not raw:
         return None
 
+    if not state.get("_first_chunk_logged"):
+        log.debug("scrcpy_mic: first audio chunk (%d bytes)", len(raw))
+        state["_first_chunk_logged"] = True
+
     if bytes_per_sample == 2:
         audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
     else:

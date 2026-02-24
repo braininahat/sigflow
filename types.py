@@ -46,7 +46,7 @@ class Keypoints(PortType):
     """Spatial keypoint data."""
 
 class TongueKeypoints(Keypoints):
-    """14 DLC tongue points."""
+    """16 DLC tongue points."""
 
 class LipKeypoints(Keypoints):
     """11 DLC lip points."""

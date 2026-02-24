@@ -13,3 +13,5 @@ from sigflow.nodes import scrcpy_screen  # noqa: F401
 from sigflow.nodes import scrcpy_camera  # noqa: F401
 from sigflow.nodes import scrcpy_mic  # noqa: F401
 from sigflow.nodes import sonostar_source  # noqa: F401
+from sigflow.nodes import face_mesh  # noqa: F401
+from sigflow.nodes import mesh_overlay  # noqa: F401
