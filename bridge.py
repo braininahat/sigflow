@@ -2,13 +2,84 @@
 from __future__ import annotations
 
 import logging
+import threading
+from dataclasses import dataclass, field
 from pathlib import Path
+
+import numpy as np
 
 from sigflow.graph import Graph, NodeDef, Connection
 from sigflow.registry import get as registry_get
 from sigflow.runtime import Pipeline
+from sigflow_editor.nodes import apply_recording_color
+from sigflow.types import (
+    TimeSeries2D, AudioSignal, Keypoints, FaceLandmarks,
+    Scalar, Event, ROI,
+)
 
 log = logging.getLogger(__name__)
+
+
+@dataclass
+class _LiveStream:
+    source_id: str
+    port_type_name: str
+    entries: list[tuple] = field(default_factory=list)
+    is_video: bool = False
+    node_id: str | None = None
+
+
+def _extract_summary(sample) -> tuple:
+    """Pure function: extract a compact summary tuple from a Sample.
+
+    Runs in pool threads — must be fast, no locks.
+    """
+    pt = sample.port_type
+    ts = sample.lsl_timestamp
+
+    if issubclass(pt, TimeSeries2D):
+        return (ts,)
+    elif issubclass(pt, AudioSignal):
+        data = sample.data
+        return (ts, float(np.min(data)), float(np.max(data)))
+    elif issubclass(pt, (Keypoints, FaceLandmarks)):
+        data = sample.data.astype(np.float64)
+        return (ts, float(np.sqrt(np.mean(data ** 2))))
+    elif issubclass(pt, Scalar):
+        return (ts, float(sample.data))
+    elif issubclass(pt, Event):
+        return (ts, str(sample.data))
+    elif issubclass(pt, ROI):
+        data = sample.data.astype(np.float64)
+        return (ts, float(np.sqrt(np.mean(data ** 2))))
+    return (ts,)
+
+
+def _on_recorded_sample(sample, node_id, lock, streams, t0_holder):
+    """Pool-thread callback: extract summary and append under lock."""
+    entry = _extract_summary(sample)
+    label = node_id or sample.source_id
+    key = (label, sample.port_type.__name__)
+    is_video = issubclass(sample.port_type, TimeSeries2D)
+    with lock:
+        if t0_holder[0] is None:
+            t0_holder[0] = sample.lsl_timestamp
+            log.info("live: first sample at t=%.3f", sample.lsl_timestamp)
+        new_stream = key not in streams
+        if new_stream:
+            streams[key] = _LiveStream(
+                source_id=sample.source_id,
+                port_type_name=sample.port_type.__name__,
+                is_video=is_video,
+                node_id=node_id,
+            )
+        streams[key].entries.append(entry)
+        count = len(streams[key].entries)
+    if new_stream:
+        log.info("live: new stream %s/%s (node=%s, video=%s)", sample.source_id,
+                 sample.port_type.__name__, node_id, is_video)
+    log.debug("live: %s/%s now has %d entries", label,
+              sample.port_type.__name__, count)
 
 
 class EditorBridge:
@@ -17,7 +88,12 @@ class EditorBridge:
     def __init__(self, node_graph):
         self._node_graph = node_graph
         self._pipeline: Pipeline | None = None
+        self._owns_pipeline = True
         self._node_id_map: dict[int, str] = {}  # id(node) → clean name
+        # Live timeline accumulator (created fresh each recording)
+        self._live_lock: threading.Lock | None = None
+        self._live_streams: dict[tuple[str, str], _LiveStream] | None = None
+        self._live_t0: list[float | None] | None = None
 
     def node_clean_name(self, node) -> str:
         """Return the original clean name for a node (before metrics pollution)."""
@@ -66,15 +142,28 @@ class EditorBridge:
         log.info("Pipeline started from editor")
 
     def stop(self) -> None:
-        if self._pipeline:
+        if not self._pipeline:
+            return
+        if self._owns_pipeline:
             self._pipeline.stop()
-            self._pipeline = None
-            # Restore clean names (undo metrics overlay pollution)
-            for node in self._node_graph.all_nodes():
-                clean = self.node_clean_name(node)
-                node.set_property("name", clean)
-            self._node_id_map.clear()
             log.info("Pipeline stopped from editor")
+        else:
+            log.info("Pipeline detached from editor")
+        self._pipeline = None
+        for node in self._node_graph.all_nodes():
+            clean = self.node_clean_name(node)
+            node.set_property("name", clean)
+        self._node_id_map.clear()
+        self._owns_pipeline = True
+
+    def attach_pipeline(self, pipeline: Pipeline) -> None:
+        """Attach to an externally-owned pipeline (don't stop on close)."""
+        self._pipeline = pipeline
+        self._owns_pipeline = False
+        self._node_id_map.clear()
+        for node in self._node_graph.all_nodes():
+            self._node_id_map[id(node)] = node.name()
+        log.info("attached to external pipeline (%d nodes)", len(self._node_id_map))
 
     def update_metrics_overlay(self) -> None:
         """Update visual node overlays with pipeline metrics."""
@@ -93,19 +182,20 @@ class EditorBridge:
 
     def on_property_changed(self, node, prop_name, prop_value) -> None:
         """Propagate editor property changes to running pipeline."""
+        if prop_name == "recording":
+            spec = registry_get(type(node)._REGISTRY_TYPE)
+            apply_recording_color(node, spec.kind, prop_value)
         if not self._pipeline or prop_name.startswith("_") or prop_name == "name":
             return
         clean_name = self.node_clean_name(node)
-        self._pipeline.update_node_config(clean_name, prop_name, prop_value)
+        log.info("property: %s.%s = %r", clean_name, prop_name, prop_value)
+        try:
+            self._pipeline.update_node_config(clean_name, prop_name, prop_value)
+        except Exception:
+            log.warning("property update failed: %s.%s = %r", clean_name, prop_name, prop_value, exc_info=True)
 
-    def load_graph(self, path: Path) -> None:
-        """Load a graph from YAML/JSON and populate the visual editor."""
-        log.info("loading graph from %s", path)
-        if path.suffix in (".yaml", ".yml"):
-            graph = Graph.load_yaml(path)
-        else:
-            graph = Graph.load_json(path)
-
+    def populate_graph(self, graph: Graph) -> None:
+        """Populate the visual editor from a sigflow Graph object."""
         self._node_graph.clear_session()
 
         node_map = {}
@@ -125,30 +215,109 @@ class EditorBridge:
                     if coerce and not isinstance(val, coerce):
                         val = coerce(val)
                     visual_node.set_property(key, val)
+            if visual_node.has_property("recording"):
+                apply_recording_color(visual_node, spec.kind, visual_node.get_property("recording"))
             node_map[node_def.id] = visual_node
             log.debug("created visual node '%s' (type=%s)", node_def.id, node_def.type)
 
         for conn in graph.connections:
             src_node = node_map.get(conn.src_id)
             dst_node = node_map.get(conn.dst_id)
-            if src_node and dst_node:
-                src_port = src_node.get_output(conn.src_port)
-                dst_port = dst_node.get_input(conn.dst_port)
-                if src_port and dst_port:
-                    src_port.connect_to(dst_port)
-                    log.debug("connected %s.%s -> %s.%s", conn.src_id, conn.src_port, conn.dst_id, conn.dst_port)
+            if not src_node or not dst_node:
+                missing = conn.src_id if not src_node else conn.dst_id
+                log.warning("populate_graph: skipping connection, node '%s' not found", missing)
+                continue
+            src_port = src_node.get_output(conn.src_port)
+            dst_port = dst_node.get_input(conn.dst_port)
+            if not src_port or not dst_port:
+                missing_port = conn.src_port if not src_port else conn.dst_port
+                log.warning("populate_graph: port '%s' not found on connection %s→%s",
+                            missing_port, conn.src_id, conn.dst_id)
+                continue
+            src_port.connect_to(dst_port)
+            log.debug("connected %s.%s -> %s.%s", conn.src_id, conn.src_port, conn.dst_id, conn.dst_port)
 
-        log.info("loaded %d nodes, %d connections into editor", len(node_map), len(graph.connections))
+        log.info("populated %d nodes, %d connections into editor", len(node_map), len(graph.connections))
+
+    def load_graph(self, path: Path) -> None:
+        """Load a graph from YAML/JSON and populate the visual editor."""
+        log.info("loading graph from %s", path)
+        if path.suffix in (".yaml", ".yml"):
+            graph = Graph.load_yaml(path)
+        else:
+            graph = Graph.load_json(path)
+        self.populate_graph(graph)
 
     def start_recording(self, output_dir="recordings", **kwargs) -> None:
-        if self._pipeline:
-            self._pipeline.start_recording(output_dir, **kwargs)
+        if not self._pipeline:
+            log.warning("start_recording: no pipeline running")
+            return
+        # Create fresh accumulator state
+        lock = threading.Lock()
+        streams: dict[tuple[str, str], _LiveStream] = {}
+        t0_holder: list[float | None] = [None]
+        self._live_lock = lock
+        self._live_streams = streams
+        self._live_t0 = t0_holder
+
+        def on_sample(sample, node_id):
+            _on_recorded_sample(sample, node_id, lock, streams, t0_holder)
+
+        try:
+            self._pipeline.start_recording(output_dir, on_sample=on_sample, **kwargs)
+        except Exception:
+            log.error("start_recording failed", exc_info=True)
+            return
+        log.info("start_recording: accumulator created, on_sample callback wired")
 
     def stop_recording(self):
-        """Stop recording and return session dir Path or None."""
+        """Stop recording, clear accumulator, return session dir Path or None."""
+        streams = self._live_streams
+        if streams:
+            total = sum(len(s.entries) for s in streams.values())
+            log.info("stop_recording: clearing accumulator (%d streams, %d total entries)",
+                     len(streams), total)
+        else:
+            log.info("stop_recording: no accumulator (no live data collected)")
+        self._live_lock = None
+        self._live_streams = None
+        self._live_t0 = None
         if self._pipeline:
             return self._pipeline.stop_recording()
         return None
+
+    def take_live_snapshot(self):
+        """Main-thread: shallow-copy live streams under lock.
+
+        Returns (streams_copy, t0) or (None, None) if not recording.
+        """
+        lock = self._live_lock
+        streams = self._live_streams
+        t0_holder = self._live_t0
+        if lock is None or streams is None or t0_holder is None:
+            log.debug("snapshot: no accumulator (not recording)")
+            return None, None
+        with lock:
+            copy = {k: _LiveStream(
+                source_id=v.source_id,
+                port_type_name=v.port_type_name,
+                entries=list(v.entries),
+                is_video=v.is_video,
+                node_id=v.node_id,
+            ) for k, v in streams.items()}
+            t0 = t0_holder[0]
+        total = sum(len(s.entries) for s in copy.values())
+        log.debug("snapshot: %d streams, t0=%s, total_entries=%d",
+                  len(copy), t0, total)
+        return copy, t0
+
+    def apply_changes(self, pipeline_bridge) -> None:
+        """Extract editor graph, restart the external pipeline, re-attach."""
+        graph = self._extract_graph()
+        pipeline_bridge.restart_with_graph(graph)
+        self._pipeline = pipeline_bridge.current_pipeline
+        self._owns_pipeline = False
+        log.info("applied changes: re-attached to new pipeline (%d nodes)", len(graph.nodes))
 
     def save_graph(self, path: Path) -> None:
         """Save the current visual graph to YAML/JSON."""

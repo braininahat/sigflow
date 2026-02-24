@@ -66,6 +66,68 @@ def _build_envelope(data: np.ndarray, target_bins: int) -> np.ndarray:
     return reshaped.max(axis=1)
 
 
+def build_live_tracks(live_streams, t0):
+    """Convert live stream snapshots to _TrackData list and compute t1.
+
+    Args:
+        live_streams: dict of (source_id, port_type_name) → _LiveStream
+        t0: recording start timestamp
+
+    Returns:
+        (tracks, t1) where t1 is the latest timestamp across all streams.
+    """
+    log.debug("build_live_tracks: %d streams in, t0=%.3f", len(live_streams), t0)
+    tracks = []
+    t1 = t0 + 0.1  # minimum 100ms window
+
+    for (source_id, port_type_name), stream in live_streams.items():
+        if not stream.entries:
+            continue
+
+        track = _TrackData(source_id=source_id, port_type=port_type_name,
+                           stream_id=0, node_id=stream.node_id)
+
+        timestamps = np.array([e[0] for e in stream.entries])
+        track.timestamps = timestamps
+        t1 = max(t1, float(timestamps[-1]))
+
+        if stream.is_video:
+            track.is_video = True
+            track.frame_count = len(stream.entries)
+        elif port_type_name == "AudioSignal":
+            # entries are (ts, chunk_min, chunk_max)
+            mins = np.array([e[1] for e in stream.entries])
+            maxs = np.array([e[2] for e in stream.entries])
+            target = min(2000, len(mins))
+            track.waveform_min = _build_waveform_overview(mins, target)[0]
+            track.waveform_max = _build_waveform_overview(maxs, target)[1]
+            # Use mins for waveform_min, maxs for waveform_max directly
+            # when enough data, downsample; otherwise use as-is
+            if len(mins) <= target:
+                track.waveform_min = mins
+                track.waveform_max = maxs
+            else:
+                chunk = len(mins) // target
+                trimmed_min = mins[:chunk * target].reshape(target, chunk)
+                trimmed_max = maxs[:chunk * target].reshape(target, chunk)
+                track.waveform_min = trimmed_min.min(axis=1)
+                track.waveform_max = trimmed_max.max(axis=1)
+        elif port_type_name == "Event":
+            # entries are (ts, label)
+            track.event_times = timestamps
+            track.event_labels = [e[1] for e in stream.entries]
+        else:
+            # Keypoints, Scalar, ROI — entries are (ts, value)
+            values = np.array([e[1] for e in stream.entries])
+            target = min(2000, len(values))
+            track.envelope = _build_envelope(values, target)
+
+        tracks.append(track)
+
+    log.debug("build_live_tracks: %d tracks out, t1=%.3f", len(tracks), t1)
+    return tracks, t1
+
+
 def _format_time(seconds: float) -> str:
     """Format seconds as MM:SS.mmm."""
     m = int(seconds) // 60
@@ -75,10 +137,12 @@ def _format_time(seconds: float) -> str:
 
 class _TrackData:
     """Pre-computed rendering data for one track."""
-    def __init__(self, source_id: str, port_type: str, stream_id: int):
+    def __init__(self, source_id: str, port_type: str, stream_id: int,
+                 node_id: str | None = None):
         self.source_id = source_id
         self.port_type = port_type
         self.stream_id = stream_id
+        self.node_id = node_id
         self.color = _TRACK_COLORS.get(port_type, QColor(150, 150, 150))
         # Populated after loading
         self.timestamps: np.ndarray = np.array([])
@@ -119,6 +183,27 @@ class TimelineWidget(QWidget):
 
     def set_playhead(self, t: float):
         self._playhead = t
+        self.update()
+
+    def update_tracks_live(self, tracks: list[_TrackData], t0: float, t1: float):
+        """Update tracks during live recording without resetting the view.
+
+        Auto-scrolls if the view end was near the previous t1 (within 0.5s).
+        """
+        log.debug("update_tracks_live: %d tracks, duration=%.1fs", len(tracks), t1 - t0)
+        prev_view_end = self._view_start + self._view_duration
+        was_following = (self._t1 - prev_view_end) < 0.5
+
+        self._tracks = tracks
+        self._t0 = t0
+        self._t1 = t1
+        self._playhead = t1  # playhead follows recording head
+
+        if was_following:
+            # Auto-scroll: keep same zoom duration, move view to show latest
+            self._view_start = max(t0, t1 - self._view_duration)
+
+        self.setMinimumHeight(RULER_HEIGHT + max(1, len(tracks)) * TRACK_HEIGHT)
         self.update()
 
     def set_view(self, start: float, duration: float):
@@ -206,7 +291,7 @@ class TimelineWidget(QWidget):
         font = QFont("sans-serif", 9)
         p.setFont(font)
         p.drawText(4, y + 4, LABEL_WIDTH - 8, TRACK_HEIGHT - 8,
-                   Qt.AlignLeft | Qt.AlignVCenter, track.source_id)
+                   Qt.AlignLeft | Qt.AlignVCenter, track.node_id or track.source_id)
 
         # Track lane background
         lane_rect = QRectF(LABEL_WIDTH, y, track_w, TRACK_HEIGHT)
@@ -408,6 +493,16 @@ class TimelinePanel(QWidget):
         self._timeline.seek_requested.connect(self._seek_to)
         layout.addWidget(self._timeline, stretch=1)
 
+    def set_live_tracks(self, tracks, t0, t1):
+        """Update timeline with live recording data (no reader needed)."""
+        log.debug("set_live_tracks: %d tracks, duration=%.1fs", len(tracks), t1 - t0)
+        self._tracks = tracks
+        self._t0 = t0
+        self._t1 = t1
+        self._current_time = t1
+        self._timeline.update_tracks_live(tracks, t0, t1)
+        self._update_time_display()
+
     def load_session(self, reader):
         """Load a SessionReader and populate tracks."""
         self._reader = reader
@@ -426,6 +521,7 @@ class TimelinePanel(QWidget):
                 source_id=stream_info.source_id,
                 port_type=stream_info.port_type,
                 stream_id=stream_info.stream_id,
+                node_id=stream_info.node_id,
             )
 
             if stream_info.filename:
@@ -436,12 +532,15 @@ class TimelinePanel(QWidget):
                     ts, _ = reader.get_time_series(stream_info.stream_id)
                     track.timestamps = ts
                 except KeyError:
-                    pass
+                    log.warning("timeline load: no timestamps for video stream %s (id=%s)",
+                                stream_info.source_id, stream_info.stream_id)
             else:
                 try:
                     ts, data = reader.get_time_series(stream_info.stream_id)
                     track.timestamps = ts
                 except KeyError:
+                    log.warning("timeline load: no data for stream %s (id=%s)",
+                                stream_info.source_id, stream_info.stream_id)
                     continue
 
                 if stream_info.port_type in ("AudioSignal",):
@@ -474,6 +573,7 @@ class TimelinePanel(QWidget):
     def _play(self):
         if not self._reader:
             return
+        log.debug("play: from %.3fs", self._current_time - self._t0)
         self._playing = True
         self._play_start_wall = time.monotonic()
         self._play_start_session = self._current_time
@@ -481,11 +581,13 @@ class TimelinePanel(QWidget):
         self._playback_timer.start()
 
     def _pause(self):
+        log.debug("pause: at %.3fs", self._current_time - self._t0)
         self._playing = False
         self._play_btn.setText("\u25b6")
         self._playback_timer.stop()
 
     def _stop(self):
+        log.debug("stop: reset to t0")
         self._pause()
         self._current_time = self._t0
         self._timeline.set_playhead(self._current_time)
@@ -501,6 +603,7 @@ class TimelinePanel(QWidget):
         self._update_time_display()
 
     def _seek_to(self, t: float):
+        log.debug("seek: %.3fs", t - self._t0)
         was_playing = self._playing
         if was_playing:
             self._pause()

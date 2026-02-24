@@ -16,6 +16,8 @@ from PySide6.QtWidgets import (
 from NodeGraphQt import NodeGraph, PropertiesBinWidget, NodesTreeWidget
 from NodeGraphQt.custom_widgets.nodes_tree import _BaseNodeTreeItem, TYPE_CATEGORY
 
+from sigflow.graph import Graph
+from sigflow.runtime import Pipeline
 from sigflow.reader import SessionReader
 from sigflow.registry import all_nodes
 from sigflow_editor.nodes import register_visual_nodes
@@ -70,10 +72,12 @@ def _restructure_palette(tree):
 
 
 class EditorWindow(QMainWindow):
-    def __init__(self, parent=None):
+    def __init__(self, graph: Graph | None = None, pipeline: Pipeline | None = None,
+                 pipeline_bridge=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("sigflow Pipeline Editor")
         self.resize(1200, 800)
+        self._pipeline_bridge = pipeline_bridge
 
         # Import built-in nodes into registry
         self._import_builtin_nodes()
@@ -136,11 +140,12 @@ class EditorWindow(QMainWindow):
         toolbar = QToolBar("Pipeline")
         self.addToolBar(toolbar)
 
-        toolbar.addAction("Start", self._on_start)
-        toolbar.addAction("Stop", self._on_stop)
+        self._start_action = toolbar.addAction("Start", self._on_start)
+        self._stop_action = toolbar.addAction("Stop", self._on_stop)
+        self._apply_action = toolbar.addAction("Apply Changes", self._on_apply_changes)
         toolbar.addSeparator()
-        toolbar.addAction("Record", self._on_record)
-        toolbar.addAction("Stop Recording", self._on_stop_record)
+        self._record_action = toolbar.addAction("Record", self._on_record)
+        self._stop_record_action = toolbar.addAction("Stop Recording", self._on_stop_record)
         toolbar.addSeparator()
         toolbar.addAction("Load YAML...", self._on_load)
         toolbar.addAction("Save YAML...", self._on_save)
@@ -158,27 +163,61 @@ class EditorWindow(QMainWindow):
         self._metrics_timer.timeout.connect(self._update_metrics)
         self._metrics_timer.setInterval(200)
 
+        # Live timeline timer (polls bridge for live recording data)
+        self._live_timeline_timer = QTimer(self)
+        self._live_timeline_timer.timeout.connect(self._update_live_timeline)
+        self._live_timeline_timer.setInterval(500)
+
         # Display pump timer (GUI updates must run on main thread)
         self._display_timer = QTimer(self)
         self._display_timer.timeout.connect(self._pump_display)
         self._display_timer.setInterval(16)  # ~60fps
 
+        # Pre-populate editor with provided graph (e.g. from running pipeline)
+        self._attached = pipeline is not None
+        if graph:
+            self._bridge.populate_graph(graph)
+            self._graph.auto_layout_nodes()
+            if pipeline:
+                self._bridge.attach_pipeline(pipeline)
+                self._metrics_timer.start()
+                self._display_timer.start()
+                self._status_label.setText("Attached")
+        if self._attached:
+            self._start_action.setEnabled(False)
+            self._stop_action.setEnabled(False)
+            self._record_action.setEnabled(False)
+            self._stop_record_action.setEnabled(False)
+            self._apply_action.setEnabled(self._pipeline_bridge is not None)
+            log.info("editor opened in attached mode — Start/Stop/Record disabled")
+        else:
+            self._apply_action.setEnabled(False)
+
     def _import_builtin_nodes(self):
-        import sigflow.nodes.webcam_source  # noqa: F401
-        import sigflow.nodes.cv2_display  # noqa: F401
-        import sigflow.nodes.crop  # noqa: F401
-        import sigflow.nodes.audio_source  # noqa: F401
-        import sigflow.nodes.spectrogram  # noqa: F401
-        import sigflow.nodes.canvas_display  # noqa: F401
-        import sigflow.nodes.dlc_inference  # noqa: F401
-        import sigflow.nodes.keypoints_overlay  # noqa: F401
-        import sigflow.nodes.face_mesh  # noqa: F401
-        import sigflow.nodes.face_roi  # noqa: F401
-        import sigflow.nodes.roi_crop  # noqa: F401
-        import sigflow.nodes.mesh_overlay  # noqa: F401
-        import sigflow.nodes.scrcpy_screen  # noqa: F401
-        import sigflow.nodes.scrcpy_camera  # noqa: F401
-        import sigflow.nodes.scrcpy_mic  # noqa: F401
+        _modules = [
+            "sigflow.nodes.webcam_source",
+            "sigflow.nodes.cv2_display",
+            "sigflow.nodes.crop",
+            "sigflow.nodes.audio_source",
+            "sigflow.nodes.spectrogram",
+            "sigflow.nodes.canvas_display",
+            "sigflow.nodes.dlc_inference",
+            "sigflow.nodes.keypoints_overlay",
+            "sigflow.nodes.face_mesh",
+            "sigflow.nodes.face_roi",
+            "sigflow.nodes.roi_crop",
+            "sigflow.nodes.mesh_overlay",
+            "sigflow.nodes.scrcpy_screen",
+            "sigflow.nodes.scrcpy_camera",
+            "sigflow.nodes.scrcpy_mic",
+            "sigflow.nodes.sonostar_source",
+        ]
+        import importlib
+        for mod_name in _modules:
+            try:
+                importlib.import_module(mod_name)
+            except Exception:
+                log.warning("failed to import node module: %s", mod_name, exc_info=True)
 
     def _on_start(self):
         log.info("starting pipeline from editor")
@@ -195,17 +234,25 @@ class EditorWindow(QMainWindow):
         self._display_timer.stop()
 
     def _on_record(self):
-        log.info("starting recording from editor")
+        log.info("record button: pipeline_running=%s",
+                 self._bridge._pipeline is not None)
         self._bridge.start_recording()
         self._status_label.setText("Recording")
+        self._live_timeline_timer.start()
 
     def _on_stop_record(self):
-        log.info("stopping recording from editor")
+        self._live_timeline_timer.stop()
         session_dir = self._bridge.stop_recording()
+        log.info("stop-record: session_dir=%s", session_dir)
         self._status_label.setText("Running")
         if session_dir:
             reader = SessionReader(session_dir)
             self._timeline_panel.load_session(reader)
+
+    def _on_apply_changes(self):
+        log.info("applying changes from editor")
+        self._bridge.apply_changes(self._pipeline_bridge)
+        self._status_label.setText("Attached")
 
     def _on_load(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -241,30 +288,56 @@ class EditorWindow(QMainWindow):
         from sigflow.nodes.canvas_display import _canvas_frames
         if not _canvas_frames:
             return
+        delivered = 0
         for node in self._graph.all_nodes():
             if type(node)._REGISTRY_TYPE != "canvas_display":
                 continue
             frame = _canvas_frames.get(self._bridge.node_clean_name(node))
             if frame is None:
                 continue
-            widget = node.view.get_widget("_preview")
-            qlabel = widget.get_custom_widget()
-            h, w = frame.shape[:2]
-            if frame.ndim == 3:
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888)
-            else:
-                qimg = QImage(frame.data, w, h, w, QImage.Format.Format_Grayscale8)
-            pm = QPixmap.fromImage(qimg.copy())
-            qlabel.setPixmap(pm.scaled(
-                qlabel.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
-            ))
+            try:
+                widget = node.view.get_widget("_preview")
+                qlabel = widget.get_custom_widget()
+                h, w = frame.shape[:2]
+                if frame.ndim == 3:
+                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888)
+                else:
+                    qimg = QImage(frame.data, w, h, w, QImage.Format.Format_Grayscale8)
+                pm = QPixmap.fromImage(qimg.copy())
+                qlabel.setPixmap(pm.scaled(
+                    qlabel.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+                ))
+                delivered += 1
+            except Exception:
+                log.warning("display pump failed for node %s", self._bridge.node_clean_name(node), exc_info=True)
+        self._pump_count = getattr(self, "_pump_count", 0) + 1
+        if delivered and self._pump_count % 60 == 0:
+            log.debug("display pump: delivered %d frames (tick %d)", delivered, self._pump_count)
 
     def _update_metrics(self):
         self._bridge.update_metrics_overlay()
+        self._metrics_tick = getattr(self, "_metrics_tick", 0) + 1
+        if self._metrics_tick % 25 == 0:  # every ~5s at 200ms interval
+            snapshot = self._bridge._pipeline.metrics_snapshot() if self._bridge._pipeline else {}
+            if snapshot:
+                summary = ", ".join(f"{k}:{v.fps:.0f}fps" for k, v in snapshot.items())
+                log.debug("metrics: %s", summary)
+
+    def _update_live_timeline(self):
+        snapshot, t0 = self._bridge.take_live_snapshot()
+        if snapshot is None or t0 is None:
+            log.debug("live timeline tick: no snapshot (not recording?)")
+            return
+        from sigflow_editor.timeline import build_live_tracks
+        tracks, t1 = build_live_tracks(snapshot, t0)
+        log.debug("live timeline tick: %d streams, %d tracks, t0=%.3f t1=%.3f",
+                  len(snapshot), len(tracks), t0, t1)
+        self._timeline_panel.set_live_tracks(tracks, t0, t1)
 
     def closeEvent(self, event):
         log.info("editor window closing")
         self._display_timer.stop()
+        self._metrics_timer.stop()
         self._bridge.stop()
         super().closeEvent(event)

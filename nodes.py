@@ -45,6 +45,22 @@ _KIND_COLORS = {
     "sink": (180, 80, 50),      # red/orange
 }
 
+_KIND_COLORS_REC = {
+    "source": (80, 200, 80),    # bright green
+    "process": (80, 140, 240),  # bright blue
+}
+
+
+def apply_recording_color(node, spec_kind, recording):
+    """Set node color based on recording status."""
+    if recording and spec_kind in _KIND_COLORS_REC:
+        node.set_color(*_KIND_COLORS_REC[spec_kind])
+    else:
+        node.set_color(*_KIND_COLORS.get(spec_kind, (100, 100, 100)))
+    log.debug("recording color: %s → %s", node.name(), "recording" if recording else "normal")
+
+
+_TYPE_COERCE = {"int": int, "float": float, "str": str, "bool": bool}
 
 _ACRONYMS = {'dlc', 'cv2', 'roi'}
 
@@ -71,10 +87,24 @@ def _make_visual_node_class(spec: NodeSpec) -> type:
 
     _group = _KIND_GROUP[_spec.kind]
 
+    # Type coercion map: NodeGraphQt spinbox get_value() returns str,
+    # which crashes QSpinBox.setValue() on undo/redo round-trips.
+    _param_coerce = {
+        p.name: _TYPE_COERCE[p.type]
+        for p in _spec.params
+        if p.type in _TYPE_COERCE
+    }
+
     class VisualNode(BaseNode):
         __identifier__ = f"sigflow.{_group}.{_spec.category}" if _spec.category else f"sigflow.{_group}"
         NODE_NAME = _display_name(_spec.name)
         _REGISTRY_TYPE = _spec.name
+
+        def set_property(self, name, value, push_undo=True):
+            coerce = _param_coerce.get(name)
+            if coerce and not isinstance(value, coerce):
+                value = coerce(value)
+            super().set_property(name, value, push_undo)
 
         def __init__(self):
             super().__init__()
