@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import enum
 import logging
+import queue
 import threading
 import time
 from collections import deque
@@ -200,6 +201,8 @@ class NodeInstance:
         self._thread: threading.Thread | None = None
         self._running = False
         self._connected_ports: set[str] = set()
+        self._output_queue: queue.Queue | None = None
+        self._dispatch_thread: threading.Thread | None = None
 
     def on_input(self, port_name: str, sample: Sample) -> None:
         """Thread-safe: insert sample into pending map and notify scheduler."""
@@ -243,7 +246,7 @@ class NodeInstance:
                     elapsed_ms = (time.perf_counter() - t0) * 1000
                     if self._metrics:
                         self._metrics.record(elapsed_ms)
-                    self._pipeline._dispatch(self.node_id, result)
+                    self._output_queue.put(result)
             except Exception:
                 consecutive_errors += 1
                 if consecutive_errors >= 3:
@@ -253,10 +256,28 @@ class NodeInstance:
                 time.sleep(0.5)
         log.debug("source loop exited: %s", self.node_id)
 
+    def _dispatch_loop(self) -> None:
+        """Drain output queue and dispatch to downstream nodes. Dedicated thread per source."""
+        while True:
+            try:
+                item = self._output_queue.get(timeout=0.1)
+                if item is None:
+                    break  # sentinel from stop()
+                self._pipeline._dispatch(self.node_id, item)
+            except queue.Empty:
+                if not self._running:
+                    break
+
     def start(self) -> None:
         """Start source node thread. Non-source nodes don't get threads."""
         self._running = True
         if self._spec.kind == "source":
+            self._output_queue = queue.Queue()
+            self._dispatch_thread = threading.Thread(
+                target=self._dispatch_loop, daemon=True,
+                name=f"sigflow-dispatch-{self.node_id}",
+            )
+            self._dispatch_thread.start()
             self._thread = threading.Thread(
                 target=self._run_source_loop, daemon=True, name=f"sigflow-{self.node_id}"
             )
@@ -268,7 +289,13 @@ class NodeInstance:
         if self._thread:
             self._thread.join(timeout=3.0)
             if self._thread.is_alive():
-                log.warning("node '%s' thread did not stop within 3s", self.node_id)
+                log.warning("node '%s' source thread did not stop within 3s", self.node_id)
+        if self._output_queue is not None:
+            self._output_queue.put(None)  # sentinel
+        if self._dispatch_thread:
+            self._dispatch_thread.join(timeout=3.0)
+            if self._dispatch_thread.is_alive():
+                log.warning("node '%s' dispatch thread did not stop within 3s", self.node_id)
 
     def init(self) -> None:
         if self._spec.init_func:
