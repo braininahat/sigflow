@@ -16,3 +16,4 @@ from sigflow.nodes import sonostar_source  # noqa: F401
 from sigflow.nodes import face_mesh  # noqa: F401
 from sigflow.nodes import mesh_overlay  # noqa: F401
 from sigflow.nodes import app_display  # noqa: F401
+from sigflow.nodes import tongue_model_display  # noqa: F401
