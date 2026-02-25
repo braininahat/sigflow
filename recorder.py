@@ -71,9 +71,22 @@ def _finalize_session(state, config):
         return None
 
     for sid, vw in state.get("video_writers", {}).items():
-        vw["proc"].stdin.close()
-        vw["proc"].wait(timeout=10)
-        log.info("video %s: %d frames", vw["filename"], vw["frame_count"])
+        if vw["proc"] is None:
+            # Still buffering (< 2 frames received) — flush with default fps
+            buf = vw.get("_buffer", [])
+            if buf:
+                filepath = state["session_dir"] / vw["filename"]
+                proc = _open_ffmpeg_writer(filepath, vw["width"], vw["height"], 30)
+                for raw_bytes, _ in buf:
+                    proc.stdin.write(raw_bytes)
+                proc.stdin.close()
+                proc.wait(timeout=10)
+                vw["frame_count"] = len(buf)
+            log.info("video %s: %d frames (flushed from buffer)", vw["filename"], vw.get("frame_count", 0))
+        else:
+            vw["proc"].stdin.close()
+            vw["proc"].wait(timeout=10)
+            log.info("video %s: %d frames", vw["filename"], vw["frame_count"])
         for entry in state.get("metadata", {}).get("streams", []):
             if entry.get("filename") == vw["filename"]:
                 entry["frame_count"] = vw["frame_count"]
@@ -132,16 +145,21 @@ def _get_or_create_xdf_stream(state, source_id, port_type, node_id=None, **kwarg
 
 
 def _record_video(sample, state, config, node_id=None):
-    """Write video frame to MP4, timestamp to XDF."""
+    """Write video frame to MP4, timestamp to XDF.
+
+    Buffers first 2 frames to compute fps from LSL timestamp delta,
+    then opens ffmpeg with the measured fps.
+    """
     vid_key = node_id or sample.source_id
     frame = sample.data
 
-    if vid_key not in state["video_writers"]:
+    vw = state["video_writers"].get(vid_key)
+
+    if vw is None:
+        # First frame — create entry, start buffering
         h, w = frame.shape[:2]
         safe_name = vid_key.lower().replace(" ", "_")
         filename = f"{safe_name}.mp4"
-        filepath = state["session_dir"] / filename
-        proc = _open_ffmpeg_writer(filepath, w, h, config["video_fps"])
         ts_stream_id = add_stream(
             state["xdf"],
             name=f"{vid_key}_timestamps",
@@ -152,12 +170,13 @@ def _record_video(sample, state, config, node_id=None):
             stream_type="VideoTimestamps",
         )
         state["video_writers"][vid_key] = {
-            "proc": proc,
+            "proc": None,
             "xdf_stream_id": ts_stream_id,
-            "frame_count": 0,
+            "frame_count": 1,
             "filename": filename,
             "width": w,
             "height": h,
+            "_buffer": [(frame.tobytes(), sample.lsl_timestamp)],
         }
         state["metadata"]["streams"].append({
             "source_id": sample.source_id,
@@ -166,19 +185,47 @@ def _record_video(sample, state, config, node_id=None):
             "format": "mp4",
             "filename": filename,
             "width": w, "height": h,
-            "declared_fps": config["video_fps"],
             "xdf_timestamp_stream_id": ts_stream_id,
         })
-        log.info("video writer: %s (%dx%d @ %dfps)", filepath, w, h,
-                 config["video_fps"])
+        push_numeric_sample(state["xdf"], ts_stream_id,
+                            sample.lsl_timestamp, [sample.lsl_timestamp])
+        return
 
-    vw = state["video_writers"][vid_key]
-    vw["proc"].stdin.write(frame.tobytes())
-    vw["frame_count"] += 1
-    if vw["frame_count"] % 100 == 0:
-        log.debug("video %s: %d frames", vid_key, vw["frame_count"])
+    # XDF timestamp for every frame
     push_numeric_sample(state["xdf"], vw["xdf_stream_id"],
                         sample.lsl_timestamp, [sample.lsl_timestamp])
+    vw["frame_count"] += 1
+
+    if vw["proc"] is None:
+        # Still buffering — accumulate until we can compute fps
+        vw["_buffer"].append((frame.tobytes(), sample.lsl_timestamp))
+
+        if len(vw["_buffer"]) >= 2:
+            t_first = vw["_buffer"][0][1]
+            t_last = vw["_buffer"][-1][1]
+            dt = t_last - t_first
+            fps = round((len(vw["_buffer"]) - 1) / dt) if dt > 0 else 30
+            fps = max(1, min(fps, 120))  # clamp to sane range
+
+            filepath = state["session_dir"] / vw["filename"]
+            vw["proc"] = _open_ffmpeg_writer(filepath, vw["width"], vw["height"], fps)
+
+            for raw_bytes, _ in vw["_buffer"]:
+                vw["proc"].stdin.write(raw_bytes)
+            del vw["_buffer"]
+
+            for entry in state["metadata"]["streams"]:
+                if entry.get("filename") == vw["filename"]:
+                    entry["actual_fps"] = fps
+
+            log.info("video writer: %s (%dx%d @ %dfps from timestamps)",
+                     filepath, vw["width"], vw["height"], fps)
+        return
+
+    # Normal path — ffmpeg is open, write directly
+    vw["proc"].stdin.write(frame.tobytes())
+    if vw["frame_count"] % 100 == 0:
+        log.debug("video %s: %d frames", vid_key, vw["frame_count"])
 
 
 def _record_audio(sample, state, node_id=None):
@@ -287,10 +334,9 @@ class SessionRecorder:
     no lock contention, no FFmpeg buffer overflows.
     """
 
-    def __init__(self, output_dir="recordings", video_fps=30, on_sample=None):
+    def __init__(self, output_dir="recordings", on_sample=None):
         self._config = {
             "output_dir": output_dir,
-            "video_fps": video_fps,
         }
         self._state: dict = {}
         self._on_sample = on_sample

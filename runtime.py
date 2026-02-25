@@ -409,7 +409,7 @@ class Pipeline:
         """Route outputs from a node to all connected downstream nodes."""
         for port_name, sample in outputs.items():
             downstream = self._adjacency.get((src_id, port_name), ())
-            if self._recorder and self._nodes[src_id]._config.get("recording"):
+            if self._recorder:
                 self._recorder.write(sample, node_id=src_id)
             if self.on_sample:
                 try:
@@ -552,18 +552,12 @@ class Pipeline:
         self._mode = PipelineMode.STOPPED
         log.info("pipeline stopped")
 
-    def start_recording(self, output_dir="recordings", video_fps=30,
+    def start_recording(self, output_dir="recordings",
                         on_sample=None) -> None:
-        """Start recording outputs from nodes with recording=True."""
-        self._recorder = SessionRecorder(output_dir, video_fps,
-                                         on_sample=on_sample)
-        recording_nodes = [nid for nid, n in self._nodes.items()
-                           if n._config.get("recording")]
-        log.info("recording started: output_dir=%s, on_sample=%s, recording_nodes=%s",
-                 output_dir, on_sample is not None, recording_nodes)
-        if not recording_nodes:
-            log.warning("recording started but NO nodes have recording=True "
-                        "— nothing will be recorded")
+        """Start recording all dispatched samples."""
+        self._recorder = SessionRecorder(output_dir, on_sample=on_sample)
+        log.info("recording started: output_dir=%s, on_sample=%s",
+                 output_dir, on_sample is not None)
 
     def stop_recording(self):
         """Stop recording and finalize the session. Returns session dir Path or None."""
