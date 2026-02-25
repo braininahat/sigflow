@@ -40,14 +40,14 @@ class NodeImageDisplay(NodeBaseWidget):
 
 # Color map by node kind
 _KIND_COLORS = {
-    "source": (50, 150, 50),    # green
-    "process": (50, 100, 180),  # blue
-    "sink": (180, 80, 50),      # red/orange
+    "source": (80, 170, 90),    # fresh green (captures)
+    "process": (124, 99, 225),  # primary purple (#7C63E1)
+    "sink": (167, 139, 250),    # secondary purple (#A78BFA)
 }
 
 _KIND_COLORS_REC = {
-    "source": (80, 200, 80),    # bright green
-    "process": (80, 140, 240),  # bright blue
+    "source": (110, 210, 120),  # bright green
+    "process": (160, 140, 250), # bright purple
 }
 
 

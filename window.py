@@ -6,12 +6,86 @@ from pathlib import Path
 
 import cv2
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QImage, QPixmap
-from PySide6.QtCore import QSize
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, QSize
+from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QDockWidget, QMainWindow, QToolBar, QFileDialog, QLabel,
 )
+
+
+def _make_icon(draw_fn, size=16):
+    """Create a QIcon by painting on a transparent pixmap."""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    draw_fn(p, size)
+    p.end()
+    return QIcon(pm)
+
+
+def _icon_play(p: QPainter, s: int):
+    p.setBrush(QColor(80, 180, 80))
+    p.setPen(Qt.NoPen)
+    p.drawPolygon(QPolygonF([QPointF(3, 2), QPointF(3, s - 2), QPointF(s - 2, s / 2)]))
+
+
+def _icon_stop(p: QPainter, s: int):
+    p.setBrush(QColor(200, 70, 70))
+    p.setPen(Qt.NoPen)
+    p.drawRect(3, 3, s - 6, s - 6)
+
+
+def _icon_refresh(p: QPainter, s: int):
+    p.setPen(QPen(QColor(70, 130, 220), 2))
+    p.drawArc(QRectF(2, 2, s - 4, s - 4), 30 * 16, 300 * 16)
+    p.setBrush(QColor(70, 130, 220))
+    p.setPen(Qt.NoPen)
+    p.drawPolygon(QPolygonF([QPointF(s - 3, 1), QPointF(s - 3, 7), QPointF(s + 1, 4)]))
+
+
+def _icon_record(p: QPainter, s: int):
+    p.setBrush(QColor(220, 50, 50))
+    p.setPen(Qt.NoPen)
+    p.drawEllipse(3, 3, s - 6, s - 6)
+
+
+def _icon_stop_rec(p: QPainter, s: int):
+    p.setBrush(QColor(80, 80, 80))
+    p.setPen(Qt.NoPen)
+    p.drawRect(3, 3, s - 6, s - 6)
+
+
+def _icon_folder(p: QPainter, s: int):
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor(200, 170, 60))
+    p.drawRoundedRect(1, 4, s - 2, s - 5, 2, 2)
+    p.drawRoundedRect(1, 3, s // 2, 3, 1, 1)
+
+
+def _icon_save(p: QPainter, s: int):
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor(100, 140, 200))
+    p.drawRoundedRect(2, 2, s - 4, s - 4, 2, 2)
+    p.setBrush(QColor(255, 255, 255))
+    p.drawRect(4, 2, s - 8, 5)
+    p.drawRect(4, s - 6, s - 8, 4)
+
+
+def _icon_layout(p: QPainter, s: int):
+    p.setPen(QPen(QColor(120, 100, 200), 1.5))
+    p.setBrush(Qt.NoBrush)
+    p.drawRect(2, 2, 5, 5)
+    p.drawRect(9, 2, 5, 5)
+    p.drawRect(2, 9, 5, 5)
+    p.drawRect(9, 9, 5, 5)
+
+
+def _icon_check(p: QPainter, s: int):
+    p.setPen(QPen(QColor(80, 180, 80), 2.5))
+    p.drawLine(QPointF(3, s / 2), QPointF(6, s - 3))
+    p.drawLine(QPointF(6, s - 3), QPointF(s - 2, 3))
+
 
 from NodeGraphQt import NodeGraph, PropertiesBinWidget, NodesTreeWidget
 from NodeGraphQt.custom_widgets.nodes_tree import _BaseNodeTreeItem, TYPE_CATEGORY
@@ -73,11 +147,14 @@ def _restructure_palette(tree):
 
 class EditorWindow(QMainWindow):
     def __init__(self, graph: Graph | None = None, pipeline: Pipeline | None = None,
-                 pipeline_bridge=None, parent=None):
+                 pipeline_bridge=None, protocol_service=None, protocol_name: str | None = None,
+                 parent=None):
         super().__init__(parent)
         self.setWindowTitle("sigflow Pipeline Editor")
         self.resize(1200, 800)
         self._pipeline_bridge = pipeline_bridge
+        self._protocol_service = protocol_service
+        self._protocol_name = protocol_name
 
         # Import built-in nodes into registry
         self._import_builtin_nodes()
@@ -136,26 +213,46 @@ class EditorWindow(QMainWindow):
         timeline_dock.setWidget(self._timeline_panel)
         self.addDockWidget(Qt.BottomDockWidgetArea, timeline_dock)
 
+        # Stylesheet (light chrome — NodeGraphQt canvas stays dark)
+        self.setStyleSheet("""
+            QMainWindow { background: #F9F8FC; }
+            QToolBar { background: #FFFFFF; border-bottom: 1px solid #E2DFED; spacing: 4px; padding: 4px; }
+            QToolBar QToolButton { padding: 4px 8px; border-radius: 4px; }
+            QToolBar QToolButton:hover { background: #F1EFF7; }
+            QDockWidget { font-weight: 500; }
+            QDockWidget::title { background: #F1EFF7; padding: 6px; }
+            QLabel#status { color: #534D64; font-size: 12px; }
+        """)
+
         # Toolbar
         toolbar = QToolBar("Pipeline")
+        toolbar.setIconSize(QSize(16, 16))
         self.addToolBar(toolbar)
 
-        self._start_action = toolbar.addAction("Start", self._on_start)
-        self._stop_action = toolbar.addAction("Stop", self._on_stop)
-        self._apply_action = toolbar.addAction("Apply Changes", self._on_apply_changes)
+        self._start_action = toolbar.addAction(_make_icon(_icon_play), "Start", self._on_start)
+        self._stop_action = toolbar.addAction(_make_icon(_icon_stop), "Stop", self._on_stop)
+        self._apply_action = toolbar.addAction(_make_icon(_icon_refresh), "Apply Changes", self._on_apply_changes)
         toolbar.addSeparator()
-        self._record_action = toolbar.addAction("Record", self._on_record)
-        self._stop_record_action = toolbar.addAction("Stop Recording", self._on_stop_record)
+        self._record_action = toolbar.addAction(_make_icon(_icon_record), "Record", self._on_record)
+        self._stop_record_action = toolbar.addAction(_make_icon(_icon_stop_rec), "Stop Recording", self._on_stop_record)
         toolbar.addSeparator()
-        toolbar.addAction("Load YAML...", self._on_load)
-        toolbar.addAction("Save YAML...", self._on_save)
+        toolbar.addAction(_make_icon(_icon_folder), "Load YAML...", self._on_load)
+        toolbar.addAction(_make_icon(_icon_save), "Save YAML...", self._on_save)
         toolbar.addSeparator()
-        toolbar.addAction("Auto Layout", self._on_auto_layout)
+        toolbar.addAction(_make_icon(_icon_layout), "Auto Layout", self._on_auto_layout)
         toolbar.addSeparator()
-        toolbar.addAction("Open Session...", self._on_open_session)
+        toolbar.addAction(_make_icon(_icon_folder), "Open Session...", self._on_open_session)
+        toolbar.addSeparator()
+        self._commit_action = toolbar.addAction(
+            _make_icon(_icon_check), "Save Pipeline", self._on_commit_protocol,
+        )
+        self._commit_action.setEnabled(
+            self._protocol_service is not None and self._protocol_name is not None
+        )
         toolbar.addSeparator()
 
         self._status_label = QLabel("Stopped")
+        self._status_label.setObjectName("status")
         toolbar.addWidget(self._status_label)
 
         # Metrics polling timer
@@ -272,6 +369,11 @@ class EditorWindow(QMainWindow):
             log.info("opening session: %s", dir_path)
             reader = SessionReader(Path(dir_path))
             self._timeline_panel.load_session(reader)
+
+    def _on_commit_protocol(self):
+        log.info("saving pipeline to protocol file '%s'", self._protocol_name)
+        self._bridge.commit_to_protocol(self._protocol_service, self._protocol_name)
+        self._status_label.setText("Pipeline Saved")
 
     def _on_save(self):
         path, _ = QFileDialog.getSaveFileName(

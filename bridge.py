@@ -319,6 +319,12 @@ class EditorBridge:
         self._owns_pipeline = False
         log.info("applied changes: re-attached to new pipeline (%d nodes)", len(graph.nodes))
 
+    def commit_to_protocol(self, protocol_service, protocol_name: str) -> None:
+        """Save the current editor graph back to a protocol YAML file."""
+        graph = self._extract_graph()
+        protocol_service.save_protocol_graph(protocol_name, graph)
+        log.info("committed graph to protocol '%s'", protocol_name)
+
     def save_graph(self, path: Path) -> None:
         """Save the current visual graph to YAML/JSON."""
         log.info("saving graph to %s", path)
