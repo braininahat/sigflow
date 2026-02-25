@@ -15,6 +15,8 @@ _BD_PARAMS = ("dynamic_range", "enhance", "focus", "harmonic")
 _HB_PARAMS = ("gain", "zoom")
 _RENDER_PARAMS = ("gray_map", "persistence", "median", "coherence", "morph_close")
 
+_ZOOM_MM_PER_SAMPLE = {0: 0.039, 1: 0.078, 2: 0.117, 3: 0.195}
+
 
 @source_node(
     name="sonostar",
@@ -66,18 +68,20 @@ def sonostar(*, state, config, clock):
         prev["gain"] = config["gain"]
         state["gain_countdown"] = 8
 
+    render_dirty = False
     if prev.get("zoom") != config["zoom"]:
         prev["zoom"] = config["zoom"]
         state["zoom_countdown"] = 8
+        render_dirty = True
 
     # Render params → rebuild renderer
-    render_dirty = False
     for name in _RENDER_PARAMS:
         if prev.get(name) != config[name]:
             prev[name] = config[name]
             render_dirty = True
     if render_dirty:
         state["renderer"] = renderer = _build_renderer(config)
+        state["_frame_metadata"] = _compute_frame_metadata(renderer)
 
     # --- Timer: keepalive every 50ms, heartbeat every 100ms ---
     now = time.monotonic()
@@ -110,7 +114,7 @@ def sonostar(*, state, config, clock):
                     lsl_timestamp=clock.lsl_now(),
                     session_time_ms=clock.session_time_ms(),
                     data=bgr,
-                    metadata={},
+                    metadata=state["_frame_metadata"],
                     port_type=UltrasoundFrame,
                 )}
     except socket.timeout:
@@ -127,8 +131,10 @@ def sonostar(*, state, config, clock):
 
 def _build_renderer(config):
     from sonospy.render import BmodeRenderer
+    mm_per_sample = _ZOOM_MM_PER_SAMPLE.get(config["zoom"], 0.195)
     return BmodeRenderer.for_probe(
         "microconvex",
+        mm_per_sample=mm_per_sample,
         gray_map_index=config["gray_map"],
         persistence=config["persistence"],
         median_level=config["median"],
@@ -137,6 +143,21 @@ def _build_renderer(config):
         double_samples=True,
         double_lines=True,
     )
+
+
+def _compute_frame_metadata(renderer):
+    geo = renderer.geometry
+    n_eff = geo.samples_per_line
+    if renderer.double_samples:
+        n_eff = 2 * n_eff - 1
+    r_end = geo.dead_radius_mm + n_eff * geo.mm_per_sample
+    scale = r_end / (renderer.output_size * 0.9)
+    return {
+        "mm_per_pixel": scale,
+        "depth_mm": n_eff * geo.mm_per_sample,
+        "dead_radius_mm": geo.dead_radius_mm,
+        "scan_angle_deg": geo.scan_angle_deg,
+    }
 
 
 def _send_bd(ctrl_sock, config):
@@ -200,6 +221,7 @@ def sonostar_init(state, config):
     state["parser"] = StreamParser()
     state["assembler"] = FrameAssembler(lines_per_frame=160, samples_per_line=512)
     state["renderer"] = _build_renderer(config)
+    state["_frame_metadata"] = _compute_frame_metadata(state["renderer"])
     state["tick"] = 0
     state["last_tick"] = 0.0
     state["live_countdown"] = 8

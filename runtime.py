@@ -203,6 +203,7 @@ class NodeInstance:
         self._connected_ports: set[str] = set()
         self._output_queue: queue.Queue | None = None
         self._dispatch_thread: threading.Thread | None = None
+        self._failed = False
 
     def on_input(self, port_name: str, sample: Sample) -> None:
         """Thread-safe: insert sample into pending map and notify scheduler."""
@@ -423,6 +424,8 @@ class Pipeline:
 
     def _schedule_node(self, node: NodeInstance) -> None:
         """Check if a non-source node is fireable and submit to pool."""
+        if node._failed:
+            return
         if self._mode != PipelineMode.LIVE:
             return
         with self._lock:
@@ -505,9 +508,13 @@ class Pipeline:
             log.debug("strategy: %s → %s (ports=%s)", node_id, strategy,
                       self._nodes[node_id]._connected_ports)
 
-        # Init all nodes
+        # Init all nodes (failures are logged but don't kill the pipeline)
         for node in self._nodes.values():
-            node.init()
+            try:
+                node.init()
+            except Exception:
+                log.error("init failed for '%s', marking as failed", node.node_id, exc_info=True)
+                node._failed = True
 
         # Start thread pool for non-source nodes
         self._pool = ThreadPoolExecutor(
@@ -518,7 +525,7 @@ class Pipeline:
 
         # Start source threads last (they push data)
         for node in self._nodes.values():
-            if node._spec.kind == "source":
+            if node._spec.kind == "source" and not node._failed:
                 node.start()
 
         log.info("pipeline started: %d nodes, %d connections, pool=%d",
@@ -547,7 +554,8 @@ class Pipeline:
             self._recorder = None
 
         for node in self._nodes.values():
-            node.cleanup()
+            if not node._failed:
+                node.cleanup()
 
         self._mode = PipelineMode.STOPPED
         log.info("pipeline stopped")
