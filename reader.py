@@ -170,7 +170,7 @@ class SessionReader:
     def get_video_frame_at_time(self, source_id: str, timestamp: float) -> np.ndarray | None:
         """Find the nearest frame index from XDF timestamps, then decode."""
         info = next((s for s in self._stream_infos
-                     if s.source_id == source_id and s.filename), None)
+                     if (s.node_id == source_id or s.source_id == source_id) and s.filename), None)
         if info is None:
             return None
         try:
@@ -188,7 +188,7 @@ class SessionReader:
         if source_id in self._video_caps:
             return self._video_caps[source_id]
         info = next((s for s in self._stream_infos
-                     if s.source_id == source_id and s.filename), None)
+                     if (s.node_id == source_id or s.source_id == source_id) and s.filename), None)
         if info is None:
             return None
         path = self._dir / info.filename

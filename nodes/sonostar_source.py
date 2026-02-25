@@ -203,8 +203,8 @@ def sonostar_init(state, config):
     state["tick"] = 0
     state["last_tick"] = 0.0
     state["live_countdown"] = 8
-    state["gain_countdown"] = 0
-    state["zoom_countdown"] = 0
+    state["gain_countdown"] = 8
+    state["zoom_countdown"] = 8
     state["_prev_params"] = {
         **{name: config[name] for name in _BD_PARAMS},
         **{name: config[name] for name in _HB_PARAMS},

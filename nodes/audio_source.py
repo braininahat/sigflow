@@ -13,9 +13,15 @@ _COMMON_RATES = [8000, 16000, 22050, 44100, 48000, 96000]
 
 
 def _discover_audio_inputs():
-    """Return {name: index} for available audio input devices."""
+    """Return {name: index} for available audio input devices.
+
+    Filters to the default host API to avoid duplicates from
+    ALSA + PulseAudio + JACK all reporting the same hardware.
+    """
     try:
-        return {d["name"]: i for i, d in enumerate(sd.query_devices()) if d["max_input_channels"] > 0}
+        default_api = sd.default.hostapi
+        return {d["name"]: i for i, d in enumerate(sd.query_devices())
+                if d["max_input_channels"] > 0 and d["hostapi"] == default_api}
     except Exception as e:
         log.warning("audio device discovery failed: %s", e)
         return {}
