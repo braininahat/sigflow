@@ -119,19 +119,26 @@ def _compute_node_world_transforms(nodes: list[dict], root_children: list[int]) 
 
 
 def _extract_static_mesh(gltf: dict, bin_data: bytes, mesh_idx: int) -> dict:
-    """Extract vertices, normals, and indices from a non-skinned mesh.
+    """Extract vertices, normals, UVs, and indices from a non-skinned mesh.
 
     Returns dict with:
         vertices: (V, 3) float32
         normals:  (V, 3) float32
+        uvs:      (V, 2) float32 or None
         indices:  (F,)   uint32
+        material_idx: int or None
     """
     mesh = gltf["meshes"][mesh_idx]
     prim = mesh["primitives"][0]
     vertices = _read_accessor(gltf, bin_data, prim["attributes"]["POSITION"]).astype(np.float32)
     normals = _read_accessor(gltf, bin_data, prim["attributes"]["NORMAL"]).astype(np.float32)
     indices = _read_accessor(gltf, bin_data, prim["indices"]).astype(np.uint32).ravel()
-    return {"vertices": vertices, "normals": normals, "indices": indices}
+    uvs = None
+    if "TEXCOORD_0" in prim["attributes"]:
+        uvs = _read_accessor(gltf, bin_data, prim["attributes"]["TEXCOORD_0"]).astype(np.float32)
+    material_idx = prim.get("material")
+    return {"vertices": vertices, "normals": normals, "uvs": uvs, "indices": indices,
+            "material_idx": material_idx}
 
 
 def parse_glb(path: str, static_mesh_names: tuple[str, ...] = ("upper_jaw", "lower_jaw")) -> dict:
@@ -192,6 +199,10 @@ def parse_glb(path: str, static_mesh_names: tuple[str, ...] = ("upper_jaw", "low
     raw_indices = _read_accessor(gltf, bin_data, prim["indices"]).astype(np.uint32).ravel()
     joint_indices = _read_accessor(gltf, bin_data, prim["attributes"]["JOINTS_0"]).astype(np.uint8)
     joint_weights = _read_accessor(gltf, bin_data, prim["attributes"]["WEIGHTS_0"]).astype(np.float32)
+    uvs = None
+    if "TEXCOORD_0" in prim["attributes"]:
+        uvs = _read_accessor(gltf, bin_data, prim["attributes"]["TEXCOORD_0"]).astype(np.float32)
+    skinned_material_idx = prim.get("material")
 
     # Read inverse bind matrices
     ibm = _read_accessor(gltf, bin_data, skin["inverseBindMatrices"]).astype(np.float32)
@@ -238,9 +249,47 @@ def parse_glb(path: str, static_mesh_names: tuple[str, ...] = ("upper_jaw", "low
         if name in static_mesh_names and "mesh" in node and "skin" not in node:
             static_meshes[name] = _extract_static_mesh(gltf, bin_data, node["mesh"])
 
+    # Extract texture images and material properties keyed by material index
+    textures = {}
+    materials_info = {}
+    for mat_idx, mat in enumerate(gltf.get("materials", [])):
+        pbr = mat.get("pbrMetallicRoughness", {})
+        mat_info = {
+            "name": mat.get("name", f"material_{mat_idx}"),
+            "baseColorFactor": pbr.get("baseColorFactor", [1, 1, 1, 1]),
+            "metallicFactor": pbr.get("metallicFactor", 1.0),
+            "roughnessFactor": pbr.get("roughnessFactor", 1.0),
+        }
+
+        def _extract_tex(tex_info_dict):
+            if tex_info_dict is None:
+                return None
+            tex_idx = tex_info_dict["index"]
+            tex_def = gltf["textures"][tex_idx]
+            img_idx = tex_def["source"]
+            img = gltf["images"][img_idx]
+            bv = gltf["bufferViews"][img["bufferView"]]
+            img_offset = bv.get("byteOffset", 0)
+            img_bytes = bin_data[img_offset:img_offset + bv["byteLength"]]
+            mime = img.get("mimeType", "image/png")
+            return {"data": img_bytes, "mime": mime}
+
+        base_tex = _extract_tex(pbr.get("baseColorTexture"))
+        mr_tex = _extract_tex(pbr.get("metallicRoughnessTexture"))
+
+        tex_entry = {}
+        if base_tex:
+            tex_entry["baseColor"] = base_tex
+        if mr_tex:
+            tex_entry["metallicRoughness"] = mr_tex
+        if tex_entry:
+            textures[mat_idx] = tex_entry
+        materials_info[mat_idx] = mat_info
+
     return {
         "vertices": vertices,
         "normals": normals,
+        "uvs": uvs,
         "indices": raw_indices,
         "joint_indices": joint_indices,
         "joint_weights": joint_weights,
@@ -252,4 +301,7 @@ def parse_glb(path: str, static_mesh_names: tuple[str, ...] = ("upper_jaw", "low
         "num_joints": num_joints,
         "num_vertices": len(vertices),
         "static_meshes": static_meshes,
+        "textures": textures,
+        "materials_info": materials_info,
+        "skinned_material_idx": skinned_material_idx,
     }

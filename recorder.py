@@ -261,6 +261,13 @@ def _record_keypoints(sample, state, node_id=None):
     )
     push_numeric_sample(state["xdf"], stream_id, sample.lsl_timestamp, flat)
 
+    # Store mm_per_pixel in metadata.json (once, from first sample)
+    mm = sample.metadata.get("mm_per_pixel")
+    if mm is not None:
+        for entry in state["metadata"]["streams"]:
+            if entry.get("xdf_stream_id") == stream_id and "mm_per_pixel" not in entry:
+                entry["mm_per_pixel"] = float(mm) if not isinstance(mm, (list, tuple)) else float(mm[0])
+
 
 def _record_roi(sample, state, node_id=None):
     """Write ROI (x, y, w, h) as double64."""
