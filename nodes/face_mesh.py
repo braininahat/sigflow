@@ -5,6 +5,7 @@ landmarks as a (468, 3) numpy array [x, y, z].  Downstream nodes
 (face_roi, mesh_overlay) consume these landmarks.
 """
 import logging
+import threading
 from pathlib import Path
 
 import cv2
@@ -17,6 +18,11 @@ from sigflow.types import Port, TimeSeries2D, FaceLandmarks
 log = logging.getLogger(__name__)
 
 _MODEL_PATH = str(Path(__file__).resolve().parents[3] / "weights" / "face_landmarker.task")
+
+# Lock around MediaPipe detect + result extraction to prevent protobuf
+# thread-safety crashes (PyTuple_GET_SIZE assertion) when ONNX/TFLite
+# threads run concurrently and trigger GC during protobuf iteration.
+_detect_lock = threading.Lock()
 
 
 @process_node(
@@ -32,14 +38,17 @@ def face_mesh(item, *, state, config):
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
 
-    result = state["landmarker"].detect(mp_image)
+    with _detect_lock:
+        result = state["landmarker"].detect(mp_image)
+        if not result.face_landmarks:
+            log.debug("no face detected")
+            return None
+        # Extract to plain Python ASAP, then release protobuf objects
+        lms = result.face_landmarks[0]
+        raw = [(lm.x, lm.y, lm.z) for lm in lms]
+        del lms, result
 
-    if not result.face_landmarks:
-        log.debug("no face detected")
-        return None
-
-    lms = result.face_landmarks[0]
-    coords = np.array([[lm.x, lm.y, lm.z] for lm in lms], dtype=np.float32)
+    coords = np.array(raw, dtype=np.float32)
 
     return {
         "landmarks": item.replace(

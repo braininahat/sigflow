@@ -588,6 +588,15 @@ class Pipeline:
         else:
             log.warning("update_node_config: node '%s' not in pipeline", node_id)
 
+    def get_node_state(self, node_id: str) -> dict | None:
+        """Return the mutable state dict for a node, or None if not found.
+
+        Useful for injecting callbacks or shared objects (e.g. text providers)
+        into node state before or after pipeline start.
+        """
+        node = self._nodes.get(node_id)
+        return node._state if node else None
+
     def metrics_snapshot(self) -> dict:
         snapshots = {}
         for node_id, node in self._nodes.items():
