@@ -48,9 +48,10 @@ def phoneme_recognizer_node(item, *, state, config):
     )
     from ultraspeech.inference.phoneme_vocab import score_phonemes
 
+    from sigflow.paths import resolve_data_path
     detail = recognize_phonemes_detailed(audio, state=state,
-                                          model_path=config.get("model_path", "weights/wav2vec2-phoneme/model.onnx"),
-                                          vocab_path=config.get("vocab_path", "weights/wav2vec2-phoneme/vocab.json"))
+                                          model_path=str(resolve_data_path(config.get("model_path", "weights/wav2vec2-phoneme/model.onnx"))),
+                                          vocab_path=str(resolve_data_path(config.get("vocab_path", "weights/wav2vec2-phoneme/vocab.json"))))
 
     recognized = detail.phonemes
     latency_ms = (time.perf_counter() - t0) * 1000
@@ -105,8 +106,9 @@ def phoneme_recognizer_node(item, *, state, config):
 
 def _load_model(state, config):
     """Lazy-load ONNX session and vocab via the inference module."""
+    from sigflow.paths import resolve_data_path
     from ultraspeech.inference.phoneme_recognizer import _load_model as _inf_load
 
-    model_path = config.get("model_path", "weights/wav2vec2-phoneme/model.onnx")
-    vocab_path = config.get("vocab_path", "weights/wav2vec2-phoneme/vocab.json")
+    model_path = str(resolve_data_path(config.get("model_path", "weights/wav2vec2-phoneme/model.onnx")))
+    vocab_path = str(resolve_data_path(config.get("vocab_path", "weights/wav2vec2-phoneme/vocab.json")))
     _inf_load(state, model_path, vocab_path)

@@ -204,15 +204,20 @@ class NodeInstance:
         self._output_queue: queue.Queue | None = None
         self._dispatch_thread: threading.Thread | None = None
         self._failed = False
+        self._consecutive_errors = 0
 
     def on_input(self, port_name: str, sample: Sample) -> None:
         """Thread-safe: insert sample into pending map and notify scheduler."""
+        if self._failed:
+            return
         log.debug("on_input: %s.%s fid=%d (pending=%d)", self.node_id, port_name, sample.frame_id, len(self._pending))
         self._pending.setdefault(sample.frame_id, {})[port_name] = sample
         self._pipeline._schedule_node(self)
 
     def _invoke(self, items: dict[str, Sample]) -> None:
         """Call the node function with one sample per input port, dispatch outputs."""
+        if self._failed:
+            return
         log.debug("invoke: %s (%d items)", self.node_id, len(items))
         t0 = time.perf_counter()
         try:
@@ -223,8 +228,15 @@ class NodeInstance:
                     result = self._spec.func(item, state=self._state, config=self._config)
                     if result:
                         self._pipeline._dispatch(self.node_id, result)
+            self._consecutive_errors = 0
         except Exception:
-            log.exception("node '%s' raised during invoke", self.node_id)
+            self._consecutive_errors += 1
+            if self._consecutive_errors == 3:
+                log.error("node '%s' failed %d consecutive times, disabling",
+                          self.node_id, self._consecutive_errors)
+                self._failed = True
+            else:
+                log.exception("node '%s' raised during invoke", self.node_id)
             return
         elapsed_ms = (time.perf_counter() - t0) * 1000
         if self._metrics:
@@ -310,7 +322,7 @@ class NodeInstance:
 
     def drain(self) -> None:
         """Process all remaining pending entries in frame_id order (ascending)."""
-        if not self._pending:
+        if self._failed or not self._pending:
             return
         for fid in sorted(self._pending):
             self._invoke(self._pending[fid])

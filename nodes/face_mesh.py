@@ -13,11 +13,10 @@ import mediapipe as mp
 import numpy as np
 
 from sigflow.node import process_node
+from sigflow.paths import resolve_data_path
 from sigflow.types import Port, TimeSeries2D, FaceLandmarks
 
 log = logging.getLogger(__name__)
-
-_MODEL_PATH = str(Path(__file__).resolve().parents[3] / "weights" / "face_landmarker.task")
 
 # Lock around MediaPipe detect + result extraction to prevent protobuf
 # thread-safety crashes (PyTuple_GET_SIZE assertion) when ONNX/TFLite
@@ -62,7 +61,8 @@ def face_mesh(item, *, state, config):
 
 @face_mesh.init
 def face_mesh_init(state, config):
-    base_options = mp.tasks.BaseOptions(model_asset_path=_MODEL_PATH)
+    model_path = str(resolve_data_path("weights/face_landmarker.task"))
+    base_options = mp.tasks.BaseOptions(model_asset_path=model_path)
     options = mp.tasks.vision.FaceLandmarkerOptions(
         base_options=base_options,
         running_mode=mp.tasks.vision.RunningMode.IMAGE,
@@ -70,7 +70,7 @@ def face_mesh_init(state, config):
         min_face_detection_confidence=0.5,
     )
     state["landmarker"] = mp.tasks.vision.FaceLandmarker.create_from_options(options)
-    log.info("initialized MediaPipe FaceLandmarker (model=%s)", _MODEL_PATH)
+    log.info("initialized MediaPipe FaceLandmarker (model=%s)", model_path)
 
 
 @face_mesh.cleanup

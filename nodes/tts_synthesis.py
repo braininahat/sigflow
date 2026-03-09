@@ -12,17 +12,16 @@ from pathlib import Path
 import numpy as np
 
 from sigflow.node import process_node, Param
+from sigflow.paths import resolve_data_path
 from sigflow.types import Event, Port, Sample, TimeSeries1D
 
 log = logging.getLogger(__name__)
 
-_WEIGHTS_DIR = Path(__file__).parents[3] / "weights"
-
 
 def _load_kokoro(state, config):
     """Lazy-load Kokoro TTS model into state."""
-    model_path = config.get("model_path", str(_WEIGHTS_DIR / "kokoro-v1.0.onnx"))
-    voices_path = config.get("voices_path", str(_WEIGHTS_DIR / "kokoro-voices-v1.0.bin"))
+    model_path = str(resolve_data_path(config.get("model_path", "weights/kokoro-v1.0.onnx")))
+    voices_path = str(resolve_data_path(config.get("voices_path", "weights/kokoro-voices-v1.0.bin")))
 
     missing = []
     if not Path(model_path).exists():
@@ -63,8 +62,8 @@ def _load_kokoro(state, config):
     outputs=[Port("audio", TimeSeries1D)],
     category="inference",
     params=[
-        Param("model_path", "str", str(_WEIGHTS_DIR / "kokoro-v1.0.onnx"), label="Model Path"),
-        Param("voices_path", "str", str(_WEIGHTS_DIR / "kokoro-voices-v1.0.bin"), label="Voices Path"),
+        Param("model_path", "str", "weights/kokoro-v1.0.onnx", label="Model Path"),
+        Param("voices_path", "str", "weights/kokoro-voices-v1.0.bin", label="Voices Path"),
         Param("voice", "str", "af_heart", label="Voice"),
         Param("speed", "float", 1.0, label="Speed", min=0.5, max=2.0),
     ],

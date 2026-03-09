@@ -90,8 +90,9 @@ def postprocess_heatmaps(
 def _load_model(state, config):
     """Lazy-load ONNX model and preprocessing config into state."""
     import onnxruntime as ort
+    from sigflow.paths import resolve_data_path
 
-    config_path = config["config_path"]
+    config_path = str(resolve_data_path(config["config_path"]))
     with open(config_path) as f:
         preprocess_cfg = yaml.safe_load(f)
 
@@ -100,7 +101,7 @@ def _load_model(state, config):
     state["joint_names"] = preprocess_cfg.get("joint_names", [])
     state["model_input_width"] = int(preprocess_cfg.get("model_input_width", 0))
 
-    model_path = config["model_path"]
+    model_path = str(resolve_data_path(config["model_path"]))
     providers = ['CPUExecutionProvider']
     session = ort.InferenceSession(model_path, providers=providers)
     state["session"] = session

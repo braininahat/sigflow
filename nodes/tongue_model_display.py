@@ -474,7 +474,8 @@ def _load_rest_pose(state, scaled_static):
 
     Returns True if a rest pose was loaded, False otherwise.
     """
-    rest_path = Path("assets/tongue_rest_pose.npz")
+    from sigflow.paths import resolve_path
+    rest_path = resolve_path("assets/tongue_rest_pose.npz")
     if not rest_path.exists():
         return False
 
@@ -601,9 +602,10 @@ def _init_mesh(state, config):
     from sigflow.nodes._glb_mesh import parse_glb
     from sigflow.nodes.app_display import _display_callback
 
+    from sigflow.paths import resolve_path
     model_path = config["model_path"]
     if not Path(model_path).is_absolute():
-        model_path = str(Path(model_path).resolve())
+        model_path = str(resolve_path(model_path))
 
     log.info("loading tongue model from %s", model_path)
     mesh = parse_glb(model_path)

@@ -185,8 +185,8 @@ def _prepare_image(path, max_dim=512):
 def _find_llama_server():
     """Find llama-server binary, preferring our CUDA build."""
     # Prefer project-local CUDA build
-    project_root = Path(__file__).resolve().parents[3]
-    local_bin = project_root / "third_party" / "llama.cpp" / "build" / "bin" / "llama-server"
+    from sigflow.paths import resolve_path
+    local_bin = resolve_path("third_party/llama.cpp/build/bin/llama-server")
     if local_bin.exists():
         return str(local_bin)
     system_bin = shutil.which("llama-server")
