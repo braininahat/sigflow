@@ -240,7 +240,7 @@ def _start_server(state, config):
             log.info("llama-server: %s", line.decode(errors="replace").rstrip())
     threading.Thread(target=_read_stderr, daemon=True, name="llama-stderr").start()
 
-    for _ in range(60):
+    for _ in range(120):
         if proc.poll() is not None:
             stderr = proc.stderr.read().decode(errors="replace")
             log.error("llama-server exited (%d): %s", proc.returncode, stderr[-500:])
@@ -256,7 +256,7 @@ def _start_server(state, config):
     proc.terminate()
     proc.wait()
     del state["proc"]
-    raise TimeoutError("llama-server failed to start within 30s")
+    raise TimeoutError("llama-server failed to start within 60s")
 
 
 @llm_inference.cleanup
