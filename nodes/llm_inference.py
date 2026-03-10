@@ -12,6 +12,7 @@ import logging
 import re
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -96,7 +97,11 @@ def llm_inference(item, *, state, config):
     usage = {}
     chunk_count = 0
 
-    with urlopen(req, timeout=30) as resp:
+    # First request may be slow (KV cache allocation, model warmup)
+    timeout = 120 if state.get("_first_request", True) else 60
+    state["_first_request"] = False
+
+    with urlopen(req, timeout=timeout) as resp:
         for line in resp:
             line = line.strip()
             if not line or not line.startswith(b"data: "):
@@ -183,12 +188,18 @@ def _prepare_image(path, max_dim=512):
 
 
 def _find_llama_server():
-    """Find llama-server binary, preferring our CUDA build."""
-    # Prefer project-local CUDA build
-    from sigflow.paths import resolve_path
+    """Find llama-server binary, preferring user-local then bundled."""
+    from sigflow.paths import DATA_DIR, resolve_path
+    # User-local build (native-optimized, persists across app versions)
+    user_bin = DATA_DIR / "bin" / "llama-server"
+    if user_bin.exists():
+        log.info("using user-local llama-server: %s", user_bin)
+        return str(user_bin)
+    # Bundled build (from AppImage/PyInstaller)
     local_bin = resolve_path("third_party/llama.cpp/build/bin/llama-server")
     if local_bin.exists():
         return str(local_bin)
+    # System PATH
     system_bin = shutil.which("llama-server")
     if system_bin:
         return system_bin
@@ -215,7 +226,6 @@ def _start_server(state, config):
         "-c", str(ctx_size),
         "--jinja",
         "--chat-template-kwargs", '{"enable_thinking": false}',
-        "--log-disable",
     ]
     if gpu:
         cmd += ["-ngl", "99"]
@@ -223,8 +233,19 @@ def _start_server(state, config):
     log.info("starting llama-server: %s", " ".join(cmd))
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     state["proc"] = proc
+    state["_first_request"] = True
+
+    def _read_stderr():
+        for line in proc.stderr:
+            log.info("llama-server: %s", line.decode(errors="replace").rstrip())
+    threading.Thread(target=_read_stderr, daemon=True, name="llama-stderr").start()
 
     for _ in range(60):
+        if proc.poll() is not None:
+            stderr = proc.stderr.read().decode(errors="replace")
+            log.error("llama-server exited (%d): %s", proc.returncode, stderr[-500:])
+            del state["proc"]
+            raise RuntimeError(f"llama-server exited with code {proc.returncode}")
         try:
             urlopen(f"http://127.0.0.1:{port}/health", timeout=1)
             log.info("llama-server ready (pid=%d, gpu=%s)", proc.pid, gpu)
