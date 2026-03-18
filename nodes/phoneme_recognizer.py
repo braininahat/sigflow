@@ -56,12 +56,13 @@ def phoneme_recognizer_node(item, *, state, config):
     recognized = detail.phonemes
     latency_ms = (time.perf_counter() - t0) * 1000
 
-    # Word-level Levenshtein score (backward compatible)
-    score = score_phonemes(expected, recognized) if expected else 0.0
-
-    # Per-phoneme confidence scoring
+    # Per-phoneme confidence scoring via Needleman-Wunsch alignment.
+    # This is the primary score — it handles multi-word responses correctly
+    # (e.g., "a rat" or "rats" for target "rat") because insertions are
+    # skipped and only the target phonemes are scored by acoustic confidence.
     per_phoneme = []
     word_score_1_5 = 3
+    avg_confidence = 0.0
     if expected and state.get("vocab_reverse"):
         phoneme_scores = score_phonemes_detailed(expected, detail, state["vocab_reverse"])
         per_phoneme = [
@@ -80,6 +81,12 @@ def phoneme_recognizer_node(item, *, state, config):
             from ultraspeech.inference.phoneme_recognizer import confidence_to_score
             avg_confidence = sum(ps.confidence for ps in phoneme_scores) / len(phoneme_scores)
             word_score_1_5 = confidence_to_score(avg_confidence)
+
+    # Primary score: per-phoneme confidence average (0.0–1.0).
+    # Falls back to Levenshtein for backward compatibility when no per-phoneme data.
+    score = avg_confidence if per_phoneme else (
+        score_phonemes(expected, recognized) if expected else 0.0
+    )
 
     duration_s = len(audio) / 16000
     log.info(
