@@ -4,7 +4,7 @@ from __future__ import annotations
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -17,6 +17,8 @@ class NodeMetrics:
     queue_depth: int = 0
     items_processed: int = 0
     backlog_depth: int = 0
+    drops: int = 0
+    custom: dict = field(default_factory=dict)
     last_update: float = 0.0
 
 
@@ -29,12 +31,22 @@ class MetricsTracker:
         self._lock = threading.Lock()
         self._times: deque[tuple[float, float]] = deque()  # (timestamp, elapsed_ms)
         self._items_processed = 0
+        self._drops = 0
+        self._custom: dict = {}
 
     def record(self, elapsed_ms: float) -> None:
         now = time.monotonic()
         with self._lock:
             self._times.append((now, elapsed_ms))
             self._items_processed += 1
+
+    def record_drop(self) -> None:
+        with self._lock:
+            self._drops += 1
+
+    def set_custom(self, key: str, value) -> None:
+        with self._lock:
+            self._custom[key] = value
 
     def _prune(self, now: float) -> None:
         cutoff = now - self._window_sec
@@ -52,6 +64,8 @@ class MetricsTracker:
                     queue_depth=queue_depth,
                     backlog_depth=backlog_depth,
                     items_processed=self._items_processed,
+                    drops=self._drops,
+                    custom=dict(self._custom),
                     last_update=now,
                 )
             elapsed_values = [t[1] for t in self._times]
@@ -63,6 +77,8 @@ class MetricsTracker:
                 queue_depth=queue_depth,
                 backlog_depth=backlog_depth,
                 items_processed=self._items_processed,
+                drops=self._drops,
+                custom=dict(self._custom),
                 last_update=now,
             )
 

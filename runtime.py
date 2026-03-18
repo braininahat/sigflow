@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import enum
 import logging
+import os
 import queue
 import threading
 import time
@@ -245,6 +246,11 @@ class NodeInstance:
     def _run_source_loop(self) -> None:
         """Blocking loop for source nodes. Stamps monotonic frame_id on all outputs."""
         log.debug("source loop started: %s", self.node_id)
+        try:
+            os.nice(-5)
+            log.debug("source thread '%s' priority elevated (nice -5)", self.node_id)
+        except (PermissionError, OSError, AttributeError):
+            pass
         consecutive_errors = 0
         while self._running:
             t0 = time.perf_counter()
@@ -613,6 +619,11 @@ class Pipeline:
         snapshots = {}
         for node_id, node in self._nodes.items():
             if node._metrics:
+                # Sync custom metrics from node state
+                for key in ("_tok_s", "_drops"):
+                    val = node._state.get(key)
+                    if val is not None:
+                        node._metrics.set_custom(key.lstrip("_"), val)
                 snapshots[node_id] = node._metrics.snapshot(
                     queue_depth=node.queue_depth(),
                     backlog_depth=node.backlog_depth(),

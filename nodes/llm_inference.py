@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -29,7 +30,7 @@ log = logging.getLogger(__name__)
     outputs=[Port("text", Event)],
     category="inference",
     params=[
-        Param("hf_model", "str", "unsloth/Qwen3.5-0.8B-GGUF:Q3_K_XL", label="HF Model"),
+        Param("hf_model", "str", "unsloth/Qwen3.5-4B-GGUF:UD-Q3_K_XL", label="HF Model"),
         Param("port", "int", 8078, label="Server Port"),
         Param("gpu", "bool", False, label="GPU Offload"),
         Param("max_tokens", "int", 40, label="Max Tokens"),
@@ -137,6 +138,9 @@ def llm_inference(item, *, state, config):
         usage.get("prompt_tokens", 0),
     )
 
+    # Expose tok/s for metrics
+    state["_tok_s"] = tok_s
+
     # Update perf info on provider
     if text_provider is not None:
         perf = f"{latency_ms:.0f}ms | {token_count}tok | {tok_s:.1f} tok/s"
@@ -210,28 +214,157 @@ def _find_llama_server():
     )
 
 
+def _resolve_cached_model(hf_model: str) -> str | None:
+    """Resolve cached GGUF file path from HF model spec, or None if not cached."""
+    cache_dir = Path(
+        os.environ.get("LLAMA_CACHE")
+        or os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")
+    ) / "llama.cpp"
+    repo_part, _, tag = hf_model.partition(":")
+    owner, _, repo = repo_part.partition("/")
+    manifest_path = cache_dir / f"manifest={owner}={repo}={tag}.json"
+    if not manifest_path.exists():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+    gguf_info = manifest.get("ggufFile", {})
+    if not gguf_info:
+        return None
+    cached = cache_dir / f"{owner}_{repo}_{gguf_info['rfilename']}"
+    return str(cached) if cached.exists() else None
+
+
+# Module-level warmup process — started eagerly at app startup
+_warmup_proc: subprocess.Popen | None = None
+
+
+def warmup_server(
+    hf_model: str = "unsloth/Qwen3.5-4B-GGUF:UD-Q3_K_XL",
+    port: int = 8078,
+    gpu: bool = False,
+    ctx_size: int = 2048,
+    callback=None,
+):
+    """Start llama-server eagerly in background (call before WiFi switches).
+
+    If callback is provided, it's called (no args) once the server is healthy.
+    """
+    def _warmup():
+        global _warmup_proc
+        try:
+            llama_bin = _find_llama_server()
+        except FileNotFoundError:
+            log.warning("llama-server not found, skipping warmup")
+            if callback:
+                callback()
+            return
+
+        cmd = [
+            llama_bin,
+            "-hf", hf_model,
+            "--port", str(port),
+            "-c", str(ctx_size),
+            "--jinja",
+            "--chat-template-kwargs", '{"enable_thinking": false}',
+        ]
+        if gpu:
+            cmd += ["-ngl", "99"]
+
+        env = os.environ.copy()
+        llama_lib_dir = str(Path(llama_bin).parent)
+        env["LD_LIBRARY_PATH"] = llama_lib_dir + ":" + env.get("LD_LIBRARY_PATH", "")
+
+        log.info("warmup: starting llama-server: %s", " ".join(cmd))
+        _warmup_proc = subprocess.Popen(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env,
+        )
+
+        def _read_stderr():
+            for line in _warmup_proc.stderr:
+                log.info("llama-server: %s", line.decode(errors="replace").rstrip())
+        threading.Thread(target=_read_stderr, daemon=True, name="llama-stderr").start()
+
+        # Wait for health check
+        for _ in range(120):
+            if _warmup_proc.poll() is not None:
+                log.error("warmup: llama-server exited (%d)", _warmup_proc.returncode)
+                _warmup_proc = None
+                break
+            try:
+                urlopen(f"http://127.0.0.1:{port}/health", timeout=1)
+                log.info("warmup: llama-server ready (pid=%d)", _warmup_proc.pid)
+                break
+            except Exception:
+                time.sleep(0.5)
+
+        if callback:
+            callback()
+
+    threading.Thread(target=_warmup, daemon=True, name="llama-warmup").start()
+
+
 def _start_server(state, config):
     """Start llama-server subprocess and wait for health check."""
-    llama_bin = _find_llama_server()
-
+    global _warmup_proc
     port = config.get("port", 8078)
-    hf_model = config.get("hf_model", "unsloth/Qwen3.5-0.8B-GGUF:Q3_K_XL")
+
+    # Check if warmup server is already running
+    if _warmup_proc is not None and _warmup_proc.poll() is None:
+        try:
+            urlopen(f"http://127.0.0.1:{port}/health", timeout=2)
+            log.info("adopting warmup llama-server (pid=%d)", _warmup_proc.pid)
+            state["proc"] = _warmup_proc
+            state["_first_request"] = False  # already warm
+            _warmup_proc = None
+            return
+        except Exception:
+            log.warning("warmup server not healthy, starting fresh")
+            _warmup_proc.terminate()
+            _warmup_proc = None
+
+    # Check if a server is already running on the port (e.g. from previous session)
+    try:
+        urlopen(f"http://127.0.0.1:{port}/health", timeout=2)
+        log.info("llama-server already running on port %d", port)
+        state["_first_request"] = False
+        return
+    except Exception:
+        pass
+
+    llama_bin = _find_llama_server()
+    hf_model = config.get("hf_model", "unsloth/Qwen3.5-4B-GGUF:UD-Q3_K_XL")
     ctx_size = config.get("context_size", 256)
     gpu = config.get("gpu", False)
 
+    # Prefer cached model (-m) for offline use, fall back to -hf
+    cached_path = _resolve_cached_model(hf_model)
+    if cached_path:
+        log.info("using cached model: %s", cached_path)
+        model_args = ["-m", cached_path]
+    else:
+        model_args = ["-hf", hf_model]
+
     cmd = [
         llama_bin,
-        "-hf", hf_model,
+        *model_args,
         "--port", str(port),
         "-c", str(ctx_size),
         "--jinja",
-        "--chat-template-kwargs", '{"enable_thinking": false}',
     ]
     if gpu:
         cmd += ["-ngl", "99"]
 
+    # Set LD_LIBRARY_PATH: llama libs first, strip AppImage _internal paths
+    env = os.environ.copy()
+    llama_lib_dir = str(Path(llama_bin).parent)
+    ld_path = env.get("LD_LIBRARY_PATH", "")
+    clean_parts = [p for p in ld_path.split(":") if p and "_internal" not in p]
+    env["LD_LIBRARY_PATH"] = ":".join([llama_lib_dir] + clean_parts)
+
     log.info("starting llama-server: %s", " ".join(cmd))
-    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env)
     state["proc"] = proc
     state["_first_request"] = True
 

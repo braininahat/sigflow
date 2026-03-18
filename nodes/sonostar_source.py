@@ -202,6 +202,14 @@ def sonostar_init(state, config):
     ctrl_sock = socket.create_connection((host, 5003), timeout=3.0)
     log.info("connected to data (5002) + control (5003)")
 
+    # Increase socket receive buffer for WiFi reliability
+    try:
+        data_sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 512 * 1024)
+        actual = data_sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+        log.info("data socket SO_RCVBUF set to %d bytes", actual)
+    except OSError as e:
+        log.warning("failed to set SO_RCVBUF: %s", e)
+
     # Send initial imaging commands
     bd_cmd = protocol.make_bd_command(
         enhance=config["enhance"],
