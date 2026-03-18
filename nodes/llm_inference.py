@@ -6,6 +6,7 @@ Logs tok/s, latency, and token counts for every invocation.
 """
 from __future__ import annotations
 
+import atexit
 import base64
 import json
 import logging
@@ -238,6 +239,25 @@ def _resolve_cached_model(hf_model: str) -> str | None:
 
 # Module-level warmup process — started eagerly at app startup
 _warmup_proc: subprocess.Popen | None = None
+
+
+def shutdown_server():
+    """Terminate llama-server subprocess to free GPU memory.
+
+    Called via app.aboutToQuit and atexit as a fallback.
+    """
+    global _warmup_proc
+    if _warmup_proc is not None and _warmup_proc.poll() is None:
+        log.info("shutting down llama-server (pid=%d)", _warmup_proc.pid)
+        _warmup_proc.terminate()
+        try:
+            _warmup_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _warmup_proc.kill()
+            _warmup_proc.wait()
+
+
+atexit.register(shutdown_server)
 
 
 def warmup_server(
