@@ -1,7 +1,5 @@
-"""Sonostar wireless ultrasound source node (raw socket, live_view pattern)."""
+"""Sonostar wireless ultrasound source node — uses ProbeClient for transport."""
 import logging
-import socket
-import time
 
 import cv2
 
@@ -10,11 +8,7 @@ from sigflow.types import Port, Sample, UltrasoundFrame
 
 log = logging.getLogger(__name__)
 
-# --- Param groups for change detection ---
-_BD_PARAMS = ("dynamic_range", "enhance", "focus", "harmonic")
-_HB_PARAMS = ("gain", "zoom")
 _RENDER_PARAMS = ("gray_map", "persistence", "median", "coherence", "morph_close")
-
 _ZOOM_MM_PER_SAMPLE = {0: 0.039, 1: 0.078, 2: 0.117, 3: 0.195}
 
 
@@ -42,39 +36,39 @@ _ZOOM_MM_PER_SAMPLE = {0: 0.039, 1: 0.078, 2: 0.117, 3: 0.195}
     category="",
 )
 def sonostar(*, state, config, clock):
-    data_sock = state.get("data_sock")
-    if data_sock is None:
+    client = state.get("client")
+    if client is None:
         return None
 
-    ctrl_sock = state["ctrl_sock"]
-    parser = state["parser"]
-    assembler = state["assembler"]
     renderer = state["renderer"]
-
-    # --- Live parameter updates: re-send commands when config changes ---
     prev = state["_prev_params"]
 
-    # BD params → re-send BD command
+    # Live probe parameter updates via ProbeClient methods
+    if prev.get("gain") != config["gain"]:
+        prev["gain"] = config["gain"]
+        client.set_gain(config["gain"])
+
+    if prev.get("zoom") != config["zoom"]:
+        prev["zoom"] = config["zoom"]
+        client.set_zoom(config["zoom"])
+        state["renderer"] = renderer = _build_renderer(config)
+        state["_frame_metadata"] = _compute_frame_metadata(renderer)
+
     bd_dirty = False
-    for name in _BD_PARAMS:
+    for name in ("dynamic_range", "enhance", "focus", "harmonic"):
         if prev.get(name) != config[name]:
             prev[name] = config[name]
             bd_dirty = True
     if bd_dirty:
-        _send_bd(ctrl_sock, config)
+        client.send_bd(
+            enhance=config["enhance"],
+            dynamic_range=config["dynamic_range"],
+            focus=config["focus"],
+            harmonic=config["harmonic"],
+        )
 
-    # Heartbeat params → set countdowns
-    if prev.get("gain") != config["gain"]:
-        prev["gain"] = config["gain"]
-        state["gain_countdown"] = 8
-
+    # Render parameter updates (local post-processing)
     render_dirty = False
-    if prev.get("zoom") != config["zoom"]:
-        prev["zoom"] = config["zoom"]
-        state["zoom_countdown"] = 8
-        render_dirty = True
-
-    # Render params → rebuild renderer
     for name in _RENDER_PARAMS:
         if prev.get(name) != config[name]:
             prev[name] = config[name]
@@ -83,50 +77,21 @@ def sonostar(*, state, config, clock):
         state["renderer"] = renderer = _build_renderer(config)
         state["_frame_metadata"] = _compute_frame_metadata(renderer)
 
-    # --- Timer: keepalive every 50ms, heartbeat every 100ms ---
-    now = time.monotonic()
-    if now - state["last_tick"] >= 0.050:
-        state["last_tick"] = now
-        state["tick"] += 1
-        tick = state["tick"]
+    # Read next frame from ProbeClient queue
+    probe_frame = client.read_frame(timeout=0.001)
+    if probe_frame is None:
+        return None
 
-        data_sock.sendall(b'\x00\x00\x00\x00')
-
-        if tick % 2 == 0:
-            _send_heartbeat(ctrl_sock, state, config)
-            if tick % 4 == 0:
-                _send_bd(ctrl_sock, config)
-
-    # --- Read data, assemble frames ---
-    try:
-        chunk = data_sock.recv(16384)
-        if chunk:
-            latest_frame = None
-            for block in parser.feed(chunk):
-                frame = assembler.push_block(block)
-                if frame is not None:
-                    latest_frame = frame
-            if latest_frame is not None:
-                image = renderer.render(latest_frame)
-                bgr = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-                return {"frame": Sample(
-                    source_id=config["source_id"],
-                    lsl_timestamp=clock.lsl_now(),
-                    session_time_ms=clock.session_time_ms(),
-                    data=bgr,
-                    metadata=state["_frame_metadata"],
-                    port_type=UltrasoundFrame,
-                )}
-    except socket.timeout:
-        pass
-
-    # --- Drain control port ---
-    try:
-        ctrl_sock.recv(256)
-    except (socket.timeout, OSError):
-        pass
-
-    return None
+    image = renderer.render(probe_frame.to_numpy())
+    bgr = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    return {"frame": Sample(
+        source_id=config["source_id"],
+        lsl_timestamp=clock.lsl_now(),
+        session_time_ms=clock.session_time_ms(),
+        data=bgr,
+        metadata=state["_frame_metadata"],
+        port_type=UltrasoundFrame,
+    )}
 
 
 def _build_renderer(config):
@@ -160,84 +125,33 @@ def _compute_frame_metadata(renderer):
     }
 
 
-def _send_bd(ctrl_sock, config):
-    from sonospy import protocol
-    cmd = protocol.make_bd_command(
-        enhance=config["enhance"],
-        dynamic_range=config["dynamic_range"],
-        focus=config["focus"],
-        harmonic=config["harmonic"],
-    )
-    ctrl_sock.sendall(cmd)
-
-
-def _send_heartbeat(ctrl_sock, state, config):
-    from sonospy import protocol
-    cmd = protocol.make_heartbeat(
-        live=True,
-        gain=config["gain"],
-        zoom=config["zoom"],
-        live_countdown=state["live_countdown"],
-        zoom_countdown=state["zoom_countdown"],
-        gain_countdown=state["gain_countdown"],
-    )
-    ctrl_sock.sendall(cmd)
-    if state["live_countdown"] > 0:
-        state["live_countdown"] -= 1
-    if state["zoom_countdown"] > 0:
-        state["zoom_countdown"] -= 1
-    if state["gain_countdown"] > 0:
-        state["gain_countdown"] -= 1
-
-
 @sonostar.init
 def sonostar_init(state, config):
-    from sonospy import protocol
-    from sonospy.data import FrameAssembler, StreamParser
+    from sonospy import ProbeClient
 
     host = config["host"]
-    log.info("connecting to Sonostar probe at %s (raw sockets)", host)
+    log.info("connecting to Sonostar probe at %s (ProbeClient)", host)
 
-    data_sock = socket.create_connection((host, 5002), timeout=3.0)
-    ctrl_sock = socket.create_connection((host, 5003), timeout=3.0)
-    log.info("connected to data (5002) + control (5003)")
+    client = ProbeClient(host=host, lines_per_frame=160, samples_per_line=512)
+    client.connect()
+    log.info("ProbeClient connected to %s", host)
 
-    # Increase socket receive buffer for WiFi reliability
-    try:
-        data_sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 512 * 1024)
-        actual = data_sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
-        log.info("data socket SO_RCVBUF set to %d bytes", actual)
-    except OSError as e:
-        log.warning("failed to set SO_RCVBUF: %s", e)
-
-    # Send initial imaging commands
-    bd_cmd = protocol.make_bd_command(
+    # Set initial imaging parameters
+    client.send_bd(
         enhance=config["enhance"],
         dynamic_range=config["dynamic_range"],
         focus=config["focus"],
         harmonic=config["harmonic"],
     )
-    ctrl_sock.sendall(bd_cmd)
-    ctrl_sock.sendall(protocol.make_vgain([64, 64, 64, 64, 64, 64, 64, 64]))
+    client.set_gain(config["gain"])
+    client.set_zoom(config["zoom"])
 
-    # 1ms non-blocking timeout (matches live_view.py)
-    data_sock.settimeout(0.001)
-    ctrl_sock.settimeout(0.001)
-
-    state["data_sock"] = data_sock
-    state["ctrl_sock"] = ctrl_sock
-    state["parser"] = StreamParser()
-    state["assembler"] = FrameAssembler(lines_per_frame=160, samples_per_line=512)
+    state["client"] = client
     state["renderer"] = _build_renderer(config)
     state["_frame_metadata"] = _compute_frame_metadata(state["renderer"])
-    state["tick"] = 0
-    state["last_tick"] = 0.0
-    state["live_countdown"] = 8
-    state["gain_countdown"] = 8
-    state["zoom_countdown"] = 8
     state["_prev_params"] = {
-        **{name: config[name] for name in _BD_PARAMS},
-        **{name: config[name] for name in _HB_PARAMS},
+        **{name: config[name] for name in ("dynamic_range", "enhance", "focus", "harmonic")},
+        "gain": config["gain"], "zoom": config["zoom"],
         **{name: config[name] for name in _RENDER_PARAMS},
     }
     log.info("Sonostar probe initialized")
@@ -246,10 +160,9 @@ def sonostar_init(state, config):
 @sonostar.cleanup
 def sonostar_cleanup(state, config):
     log.info("closing Sonostar probe connection")
-    for key in ("data_sock", "ctrl_sock"):
-        sock = state.get(key)
-        if sock is not None:
-            try:
-                sock.close()
-            except OSError:
-                pass
+    client = state.get("client")
+    if client is not None:
+        try:
+            client.close()
+        except Exception as e:
+            log.warning("error closing ProbeClient: %s", e)

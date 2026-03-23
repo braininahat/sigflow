@@ -17,10 +17,6 @@ from sigflow.nodes import face_mesh  # noqa: F401
 from sigflow.nodes import mesh_overlay  # noqa: F401
 from sigflow.nodes import app_display  # noqa: F401
 from sigflow.nodes import tongue_model_display  # noqa: F401
-from sigflow.nodes import elicitation_markers  # noqa: F401
 from sigflow.nodes import llm_inference  # noqa: F401
 from sigflow.nodes import tts_synthesis  # noqa: F401
-from sigflow.nodes import phoneme_recognizer  # noqa: F401
 from sigflow.nodes import audio_playback  # noqa: F401
-from sigflow.nodes import elicitation_events  # noqa: F401
-from sigflow.nodes import elicitation_results  # noqa: F401
