@@ -59,7 +59,7 @@ def _load_kokoro(state, config):
 @process_node(
     name="tts_synthesis",
     inputs=[Port("text", Event)],
-    outputs=[Port("audio", TimeSeries1D)],
+    outputs=[Port("audio", AudioSignal)],
     category="inference",
     params=[
         Param("model_path", "str", "weights/kokoro-v1.0.onnx", label="Model Path"),

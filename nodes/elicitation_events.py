@@ -32,7 +32,7 @@ def set_event_queue(q: queue_mod.Queue | None) -> None:
     name="elicitation_events",
     outputs=[
         Port("prompt", Event),
-        Port("audio", TimeSeries1D),
+        Port("audio", AudioSignal),
         Port("markers", MarkerEvent),
     ],
     category="elicitation",

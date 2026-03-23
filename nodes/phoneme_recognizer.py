@@ -16,6 +16,15 @@ from sigflow.types import Event, Port, Sample, TimeSeries1D
 
 log = logging.getLogger(__name__)
 
+# Module-level shared session — PhonemeRecognizerService pushes, node reuses.
+_shared_session: dict | None = None
+
+
+def set_shared_session(state: dict | None) -> None:
+    """Set the shared ONNX session. Called by PhonemeRecognizerService after warmup."""
+    global _shared_session
+    _shared_session = state
+
 
 @process_node(
     name="phoneme_recognizer",
@@ -112,7 +121,12 @@ def phoneme_recognizer_node(item, *, state, config):
 
 
 def _load_model(state, config):
-    """Lazy-load ONNX session and vocab via the inference module."""
+    """Lazy-load ONNX session and vocab — reuses shared session if available."""
+    if _shared_session and "session" in _shared_session:
+        state.update(_shared_session)
+        log.info("phoneme recognizer: reusing shared session")
+        return
+
     from sigflow.paths import resolve_data_path
     from ultraspeech.inference.phoneme_recognizer import _load_model as _inf_load
 
