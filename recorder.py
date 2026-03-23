@@ -5,7 +5,13 @@ Produces:
   ├── streams.xdf      (audio, keypoints, landmarks, events, video timestamps)
   ├── <node_id>.mp4    (one per producing node — avoids resolution collisions)
   └── metadata.json    (session config, stream registry, timing)
+
+Pluggable backends: pass RecordingBackend instances to SessionRecorder
+for additional recording formats (CSV, Parquet, etc.) alongside the
+default XDF+MP4 pipeline.
 """
+from __future__ import annotations
+
 import json
 import logging
 import queue
@@ -13,12 +19,13 @@ import subprocess
 import threading
 from datetime import datetime
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 import imageio_ffmpeg
 
 from sigflow.types import (
     PortType, TimeSeries1D, TimeSeries2D, AudioSignal, Keypoints, FaceLandmarks,
-    Scalar, Event, ROI,
+    Scalar, Event, ROI, Sample,
 )
 from sigflow.xdf_writer import (
     open_xdf_raw, close_xdf, add_stream, push_numeric_sample,
@@ -28,6 +35,24 @@ from sigflow.xdf_writer import (
 log = logging.getLogger(__name__)
 
 _SENTINEL = object()  # signals writer thread to shut down
+
+
+@runtime_checkable
+class RecordingBackend(Protocol):
+    """Interface for pluggable recording backends.
+
+    Implement this to add custom recording formats alongside the default
+    XDF+MP4 pipeline. Backends receive every sample the recorder gets
+    and are finalized when the session ends.
+    """
+
+    def on_sample(self, sample: Sample, node_id: str | None, session_dir: Path) -> None:
+        """Called for each sample. Must be thread-safe (called from writer thread)."""
+        ...
+
+    def finalize(self, session_dir: Path) -> None:
+        """Called when the session ends. Close files, flush buffers."""
+        ...
 
 
 def _open_ffmpeg_writer(filepath, w, h, fps):
@@ -322,7 +347,7 @@ def _route_sample(sample, state, config, node_id=None):
         log.warning("recorder: unhandled port_type %s", pt.__name__)
 
 
-def _writer_loop(q, state, config):
+def _writer_loop(q, state, config, backends=None):
     """Drain queue on a dedicated thread — sole consumer of state."""
     while True:
         item = q.get()
@@ -331,6 +356,13 @@ def _writer_loop(q, state, config):
         sample, node_id = item
         _ensure_session(state, config)
         _route_sample(sample, state, config, node_id=node_id)
+        if backends:
+            session_dir = state.get("session_dir")
+            for backend in backends:
+                try:
+                    backend.on_sample(sample, node_id, session_dir)
+                except Exception:
+                    log.exception("recording backend %s failed on sample", type(backend).__name__)
 
 
 class SessionRecorder:
@@ -341,12 +373,14 @@ class SessionRecorder:
     no lock contention, no FFmpeg buffer overflows.
     """
 
-    def __init__(self, output_dir="recordings", on_sample=None):
+    def __init__(self, output_dir="recordings", on_sample=None,
+                 backends: list[RecordingBackend] | None = None):
         self._config = {
             "output_dir": output_dir,
         }
         self._state: dict = {}
         self._on_sample = on_sample
+        self._backends = backends or []
         self._first_sample_logged = False
 
         # Create session directory eagerly so callers can write ancillary
@@ -357,7 +391,7 @@ class SessionRecorder:
         self._queue: queue.Queue = queue.Queue()
         self._thread = threading.Thread(
             target=_writer_loop,
-            args=(self._queue, self._state, self._config),
+            args=(self._queue, self._state, self._config, self._backends),
             daemon=True,
         )
         self._thread.start()
@@ -384,4 +418,10 @@ class SessionRecorder:
             log.warning("writer thread did not shut down within timeout")
         if "session_dir" not in self._state:
             log.warning("finalize: no session was created (no samples received)")
+        session_dir = self._state.get("session_dir")
+        for backend in self._backends:
+            try:
+                backend.finalize(session_dir)
+            except Exception:
+                log.exception("recording backend %s finalize failed", type(backend).__name__)
         return _finalize_session(self._state, self._config)

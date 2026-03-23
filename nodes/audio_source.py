@@ -1,5 +1,14 @@
-"""Microphone capture source node (sounddevice)."""
+"""Microphone capture source node (sounddevice).
+
+Includes a shared circular audio buffer that other services can read
+via get_audio_segment(t_start, t_end) to extract audio by LSL timestamp
+range. This enables ElicitationService to use the pipeline mic instead
+of running its own sounddevice InputStream.
+"""
+from __future__ import annotations
+
 import logging
+import threading
 
 import numpy as np
 import sounddevice as sd
@@ -10,6 +19,59 @@ from sigflow.types import Port, Sample, AudioSignal
 log = logging.getLogger(__name__)
 
 _COMMON_RATES = [8000, 16000, 22050, 44100, 48000, 96000]
+
+
+class SharedAudioBuffer:
+    """Thread-safe circular buffer of timestamped audio chunks.
+
+    Stores the last `max_seconds` of audio from the pipeline mic,
+    indexed by LSL timestamp for extraction by time range.
+    """
+
+    def __init__(self, max_seconds: float = 30.0):
+        self._lock = threading.Lock()
+        self._chunks: list[tuple[float, np.ndarray]] = []  # (lsl_ts, data)
+        self._sample_rate: int = 48000
+        self._max_seconds = max_seconds
+
+    @property
+    def sample_rate(self) -> int:
+        return self._sample_rate
+
+    @sample_rate.setter
+    def sample_rate(self, rate: int):
+        self._sample_rate = rate
+
+    def push(self, lsl_timestamp: float, data: np.ndarray) -> None:
+        """Append a chunk with its LSL timestamp."""
+        with self._lock:
+            self._chunks.append((lsl_timestamp, data))
+            # Evict old chunks beyond max_seconds
+            if self._chunks:
+                cutoff = self._chunks[-1][0] - self._max_seconds
+                while self._chunks and self._chunks[0][0] < cutoff:
+                    self._chunks.pop(0)
+
+    def get_segment(self, t_start: float, t_end: float) -> np.ndarray | None:
+        """Extract audio between LSL timestamps, concatenated."""
+        with self._lock:
+            segments = []
+            for ts, data in self._chunks:
+                chunk_end = ts + len(data) / self._sample_rate
+                if chunk_end >= t_start and ts <= t_end:
+                    segments.append(data)
+            if not segments:
+                return None
+            return np.concatenate(segments)
+
+
+# Module-level shared buffer instance
+_shared_buffer: SharedAudioBuffer | None = None
+
+
+def get_shared_buffer() -> SharedAudioBuffer | None:
+    """Get the shared audio buffer (set by the microphone node)."""
+    return _shared_buffer
 
 
 def _discover_audio_inputs():
@@ -57,6 +119,7 @@ _RATE_CHOICES = _discover_supported_rates()
     ],
 )
 def microphone(*, state, config, clock):
+    global _shared_buffer
     sample_rate = int(config["sample_rate"])
     chunk_size = config["chunk_size"]
     device = config["device"]
@@ -73,15 +136,26 @@ def microphone(*, state, config, clock):
         )
         state["stream"].start()
         state["sample_rate"] = sample_rate
+        # Initialize shared audio buffer for other services
+        _shared_buffer = SharedAudioBuffer(max_seconds=30.0)
+        _shared_buffer.sample_rate = sample_rate
 
     data, overflowed = state["stream"].read(chunk_size)
     if overflowed:
         log.warning("audio overflow (device=%s)", device)
+
+    flat = data.flatten()
+    ts = clock.lsl_now()
+
+    # Push to shared buffer for ElicitationService
+    if _shared_buffer is not None:
+        _shared_buffer.push(ts, flat)
+
     return {"audio": Sample(
         source_id=config["source_id"],
-        lsl_timestamp=clock.lsl_now(),
+        lsl_timestamp=ts,
         session_time_ms=clock.session_time_ms(),
-        data=data.flatten(),
+        data=flat,
         metadata={"sample_rate": state["sample_rate"]},
         port_type=AudioSignal,
     )}
