@@ -13,7 +13,7 @@ import numpy as np
 
 from sigflow.node import process_node, Param
 from sigflow.paths import resolve_data_path
-from sigflow.types import Event, Port, Sample, TimeSeries1D
+from sigflow.types import AudioSignal, Event, Port, Sample, TimeSeries1D
 
 log = logging.getLogger(__name__)
 
@@ -88,7 +88,7 @@ def tts_synthesis(item, *, state, config):
 
     return {"audio": item.replace(
         data=samples,
-        port_type=TimeSeries1D,
+        port_type=AudioSignal,
         metadata={
             **item.metadata,
             "sample_rate": sr,

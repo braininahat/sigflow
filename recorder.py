@@ -17,7 +17,7 @@ from pathlib import Path
 import imageio_ffmpeg
 
 from sigflow.types import (
-    PortType, TimeSeries2D, AudioSignal, Keypoints, FaceLandmarks,
+    PortType, TimeSeries1D, TimeSeries2D, AudioSignal, Keypoints, FaceLandmarks,
     Scalar, Event, ROI,
 )
 from sigflow.xdf_writer import (
@@ -308,7 +308,7 @@ def _route_sample(sample, state, config, node_id=None):
     log.debug("record: %s → %s (node=%s)", sample.source_id, pt.__name__, node_id)
     if issubclass(pt, TimeSeries2D) and sample.data.ndim == 3:
         _record_video(sample, state, config, node_id=node_id)
-    elif issubclass(pt, AudioSignal):
+    elif issubclass(pt, (AudioSignal, TimeSeries1D)):
         _record_audio(sample, state, node_id=node_id)
     elif issubclass(pt, (Keypoints, FaceLandmarks)):
         _record_keypoints(sample, state, node_id=node_id)

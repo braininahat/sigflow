@@ -14,7 +14,7 @@ import queue as queue_mod
 import time
 
 from sigflow.node import source_node
-from sigflow.types import Event, MarkerEvent, Port, Sample, TimeSeries1D
+from sigflow.types import AudioSignal, Event, MarkerEvent, Port, Sample, TimeSeries1D
 
 log = logging.getLogger(__name__)
 
@@ -69,7 +69,7 @@ def elicitation_events(*, state, config, clock):
             session_time_ms=session_ms,
             data=event.get("data"),
             metadata=event.get("metadata", {}),
-            port_type=TimeSeries1D,
+            port_type=AudioSignal,
         )}
     else:
         # All other events → marker stream (for XDF recording)
