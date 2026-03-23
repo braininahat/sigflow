@@ -349,6 +349,11 @@ class SessionRecorder:
         self._on_sample = on_sample
         self._first_sample_logged = False
 
+        # Create session directory eagerly so callers can write ancillary
+        # files (e.g., elicitation_events.jsonl) to the correct location.
+        _ensure_session(self._state, self._config)
+        self.session_dir: Path = self._state["session_dir"]
+
         self._queue: queue.Queue = queue.Queue()
         self._thread = threading.Thread(
             target=_writer_loop,
@@ -357,8 +362,8 @@ class SessionRecorder:
         )
         self._thread.start()
 
-        log.info("SessionRecorder created: output_dir=%s, on_sample=%s",
-                 output_dir, on_sample is not None)
+        log.info("SessionRecorder created: %s, on_sample=%s",
+                 self.session_dir, on_sample is not None)
 
     def write(self, sample, node_id=None):
         """Enqueue a sample for the writer thread. Returns immediately."""

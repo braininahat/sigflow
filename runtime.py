@@ -579,11 +579,10 @@ class Pipeline:
         log.info("pipeline stopped")
 
     def start_recording(self, output_dir="recordings",
-                        on_sample=None) -> None:
-        """Start recording all dispatched samples."""
+                        on_sample=None) -> Path | None:
+        """Start recording all dispatched samples. Returns session dir."""
         self._recorder = SessionRecorder(output_dir, on_sample=on_sample)
-        log.info("recording started: output_dir=%s, on_sample=%s",
-                 output_dir, on_sample is not None)
+        return self._recorder.session_dir
 
     def stop_recording(self):
         """Stop recording and finalize the session. Returns session dir Path or None."""
