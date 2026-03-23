@@ -37,7 +37,7 @@ _ZOOM_MM_PER_SAMPLE = {0: 0.039, 1: 0.078, 2: 0.117, 3: 0.195}
 )
 def sonostar(*, state, config, clock):
     client = state.get("client")
-    if client is None:
+    if client is None or not client.is_connected:
         return None
 
     renderer = state["renderer"]
