@@ -68,6 +68,7 @@ def _open_ffmpeg_writer(filepath, w, h, fps):
         "-crf", "18",
         "-pix_fmt", "yuv420p",
         "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+        "-movflags", "+frag_keyframe+empty_moov",
         str(filepath),
     ]
     return subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
@@ -130,9 +131,12 @@ def _finalize_session(state, config):
     session_dir = state["session_dir"]
 
     if "metadata" in state:
+        import os
         meta_path = session_dir / "metadata.json"
-        with open(meta_path, "w") as f:
+        tmp_path = meta_path.with_suffix(".tmp")
+        with open(tmp_path, "w") as f:
             json.dump(state["metadata"], f, indent=2)
+        os.replace(tmp_path, meta_path)
         log.info("metadata → %s", meta_path)
 
     for key in ("session_dir", "xdf", "video_writers", "xdf_streams", "metadata"):
@@ -349,13 +353,21 @@ def _route_sample(sample, state, config, node_id=None):
 
 def _writer_loop(q, state, config, backends=None):
     """Drain queue on a dedicated thread — sole consumer of state."""
+    write_count = 0
     while True:
         item = q.get()
         if item is _SENTINEL:
             return
         sample, node_id = item
         _ensure_session(state, config)
-        _route_sample(sample, state, config, node_id=node_id)
+        try:
+            _route_sample(sample, state, config, node_id=node_id)
+        except OSError as e:
+            log.error("recording write failed (disk full?): %s", e)
+            break
+        write_count += 1
+        if write_count % 100 == 0:
+            log.info("recorder: %d samples written, queue depth: %d", write_count, q.qsize())
         if backends:
             session_dir = state.get("session_dir")
             for backend in backends:
@@ -415,7 +427,8 @@ class SessionRecorder:
         self._queue.put(_SENTINEL)
         self._thread.join(timeout=10.0)
         if self._thread.is_alive():
-            log.warning("writer thread did not shut down within timeout")
+            log.warning("recorder writer thread did not stop in time, forcing finalize")
+            _finalize_session(self._state, self._config)
         if "session_dir" not in self._state:
             log.warning("finalize: no session was created (no samples received)")
         session_dir = self._state.get("session_dir")

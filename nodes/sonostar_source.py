@@ -38,8 +38,12 @@ _ZOOM_MM_PER_SAMPLE = {0: 0.039, 1: 0.078, 2: 0.117, 3: 0.195}
 def sonostar(*, state, config, clock):
     client = state.get("client")
     if client is None or not client.is_connected:
+        if state.get("_was_connected", False):
+            log.error("ultrasound probe disconnected mid-session")
+            state["_was_connected"] = False
         return None
 
+    state["_was_connected"] = True
     renderer = state["renderer"]
     prev = state["_prev_params"]
 

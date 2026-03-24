@@ -39,8 +39,9 @@ def app_display(item, *, state, config):
 def app_keypoints(item, *, state, config):
     data = item.data
     flat = data.flatten().tolist() if hasattr(data, "flatten") else data if isinstance(data, list) else []
+    joint_names = item.metadata.get("joint_names", []) if item.metadata else []
     if _display_callback:
-        _display_callback(config["display_id"], "keypoints", flat)
+        _display_callback(config["display_id"], "keypoints", {"points": flat, "names": joint_names})
 
 
 @sink_node(

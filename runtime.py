@@ -196,6 +196,7 @@ class NodeInstance:
         self._state: dict = {}
         self._clock = clock
         self._pipeline = pipeline
+        self._lock = threading.Lock()
         self._pending: dict[int, dict[str, Sample]] = {}
         self._match_strategy: str = "single"
         self._metrics: MetricsTracker | None = None
@@ -212,7 +213,11 @@ class NodeInstance:
         if self._failed:
             return
         log.debug("on_input: %s.%s fid=%d (pending=%d)", self.node_id, port_name, sample.frame_id, len(self._pending))
-        self._pending.setdefault(sample.frame_id, {})[port_name] = sample
+        with self._lock:
+            self._pending.setdefault(sample.frame_id, {})[port_name] = sample
+            pending_size = len(self._pending)
+            if pending_size > 10 and pending_size % 10 == 0:
+                log.warning("node '%s' pending backlog: %d frames", self.node_id, pending_size)
         self._pipeline._schedule_node(self)
 
     def _invoke(self, items: dict[str, Sample]) -> None:
@@ -362,7 +367,7 @@ class Pipeline:
     def __init__(self, max_workers: int = 4):
         self._nodes: dict[str, NodeInstance] = {}
         self._connections: list[Connection] = []
-        self._clock = MasterClock(time_fn=time.monotonic)
+        self._clock = MasterClock()
         self._metrics = MetricsCollector()
         self._mode = PipelineMode.STOPPED
         self._max_workers = max_workers
@@ -428,8 +433,9 @@ class Pipeline:
         """Route outputs from a node to all connected downstream nodes."""
         for port_name, sample in outputs.items():
             downstream = self._adjacency.get((src_id, port_name), ())
-            if self._recorder:
-                self._recorder.write(sample, node_id=src_id)
+            recorder = self._recorder
+            if recorder:
+                recorder.write(sample, node_id=src_id)
             if self.on_sample:
                 try:
                     self.on_sample(src_id, port_name, sample)
@@ -573,7 +579,10 @@ class Pipeline:
 
         for node in self._nodes.values():
             if not node._failed:
-                node.cleanup()
+                try:
+                    node.cleanup()
+                except Exception:
+                    log.exception("cleanup failed for '%s', continuing", node.node_id)
 
         self._mode = PipelineMode.STOPPED
         log.info("pipeline stopped")

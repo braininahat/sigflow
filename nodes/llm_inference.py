@@ -247,14 +247,21 @@ def shutdown_server():
     Called via app.aboutToQuit and atexit as a fallback.
     """
     global _warmup_proc
+    log.info("shutdown_server called (proc=%s)", _warmup_proc.pid if _warmup_proc else None)
     if _warmup_proc is not None and _warmup_proc.poll() is None:
         log.info("shutting down llama-server (pid=%d)", _warmup_proc.pid)
         _warmup_proc.terminate()
         try:
             _warmup_proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
+            log.warning("llama-server did not terminate, killing")
             _warmup_proc.kill()
             _warmup_proc.wait()
+        log.info("llama-server stopped")
+        _warmup_proc = None
+    elif _warmup_proc is not None:
+        log.info("llama-server already exited (rc=%s)", _warmup_proc.returncode)
+        _warmup_proc = None
 
 
 atexit.register(shutdown_server)

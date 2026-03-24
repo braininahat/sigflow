@@ -129,11 +129,13 @@ def open_xdf(path: str | Path):
 def close_xdf(xdf: dict) -> None:
     """Write stream footers and close the XDF file."""
     f = xdf["file"]
-    for stream_id, info in xdf["streams"].items():
-        footer_xml = _build_footer_xml(info)
-        content = struct.pack("<I", stream_id) + footer_xml
-        _write_chunk(f, tag=6, content=content)
-    f.close()
+    try:
+        for stream_id, info in xdf["streams"].items():
+            footer_xml = _build_footer_xml(info)
+            content = struct.pack("<I", stream_id) + footer_xml
+            _write_chunk(f, tag=6, content=content)
+    finally:
+        f.close()
 
 
 def add_stream(
