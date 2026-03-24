@@ -41,7 +41,14 @@ def face_mesh(item, *, state, config):
         result = state["landmarker"].detect(mp_image)
         if not result.face_landmarks:
             log.debug("no face detected")
-            return None
+            return {
+                "frame": item,
+                "landmarks": item.replace(
+                    data=np.zeros((478, 3), dtype=np.float32),
+                    port_type=FaceLandmarks,
+                    metadata={**item.metadata, "frame_shape": (h, w), "no_face": True},
+                ),
+            }
         # Extract to plain Python ASAP, then release protobuf objects
         lms = result.face_landmarks[0]
         raw = [(lm.x, lm.y, lm.z) for lm in lms]

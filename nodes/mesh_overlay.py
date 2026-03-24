@@ -47,6 +47,7 @@ def _load_connections():
 def mesh_overlay(item, *, state, config):
     if issubclass(item.port_type, FaceLandmarks):
         state["landmarks"] = item
+        state["_no_face"] = item.metadata.get("no_face", False)
     else:
         state["frame"] = item
 
@@ -56,6 +57,9 @@ def mesh_overlay(item, *, state, config):
     _load_connections()
 
     frame_sample = state.pop("frame")
+    if state.pop("_no_face", False):
+        state.pop("landmarks", None)
+        return {"overlay": frame_sample}
     landmarks_data = state.pop("landmarks").data  # (468, 3) normalized
     frame = frame_sample.data.copy()
     h, w = frame.shape[:2]

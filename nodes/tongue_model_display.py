@@ -836,6 +836,8 @@ def tongue_model_display(item, *, state, config):
 
     valid = confidence >= threshold
     if valid.sum() < 3:
+        log.debug("tongue_model_display: skipping frame — only %d/%d valid (threshold=%.2f, conf range=%.3f-%.3f)",
+                  valid.sum(), len(confidence), threshold, confidence.min(), confidence.max())
         return
 
     mm_per_pixel = item.metadata.get("mm_per_pixel", 1.0)
@@ -1006,7 +1008,10 @@ def tongue_model_display(item, *, state, config):
         interleaved[:, 3:] = deformed_normals
 
     if _display_callback:
+        log.debug("tongue_model_display: emitting mesh (%d verts) + transforms", state["num_vertices"])
         _display_callback(display_id, "mesh", interleaved.tobytes())
         _display_callback(display_id, "head_rotation", head_euler)
         _display_callback(display_id, "mandible_angle", mandible_angle)
         _display_callback(display_id, "mandible_protrusion", protrusion)
+    else:
+        log.debug("tongue_model_display: _display_callback is None, mesh not sent")
