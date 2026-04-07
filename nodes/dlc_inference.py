@@ -101,8 +101,10 @@ def _load_model(state, config):
     state["joint_names"] = preprocess_cfg.get("joint_names", [])
     state["model_input_width"] = int(preprocess_cfg.get("model_input_width", 0))
 
+    from sigflow.onnx_providers import get_providers
+
     model_path = str(resolve_data_path(config["model_path"]))
-    providers = ['CPUExecutionProvider']
+    providers = get_providers()
     session = ort.InferenceSession(model_path, providers=providers)
     state["session"] = session
     state["input_name"] = session.get_inputs()[0].name

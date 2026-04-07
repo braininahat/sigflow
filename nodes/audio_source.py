@@ -11,7 +11,6 @@ import logging
 import threading
 
 import numpy as np
-import sounddevice as sd
 
 from sigflow.node import source_node, Param
 from sigflow.types import Port, Sample, AudioSignal
@@ -81,6 +80,7 @@ def _discover_audio_inputs():
     ALSA + PulseAudio + JACK all reporting the same hardware.
     """
     try:
+        import sounddevice as sd
         default_api = sd.default.hostapi
         return {d["name"]: i for i, d in enumerate(sd.query_devices())
                 if d["max_input_channels"] > 0 and d["hostapi"] == default_api}
@@ -91,6 +91,7 @@ def _discover_audio_inputs():
 
 def _discover_supported_rates():
     """Probe the default input device for supported sample rates."""
+    import sounddevice as sd
     supported = []
     for rate in _COMMON_RATES:
         try:
@@ -101,9 +102,14 @@ def _discover_supported_rates():
     return supported if supported else [str(_COMMON_RATES[3])]  # fallback to 44100
 
 
-_AUDIO_DEVICES = _discover_audio_inputs()
-_AUDIO_CHOICES = ["default"] + list(_AUDIO_DEVICES.keys())
-_RATE_CHOICES = _discover_supported_rates()
+try:
+    _AUDIO_DEVICES = _discover_audio_inputs()
+    _AUDIO_CHOICES = ["default"] + list(_AUDIO_DEVICES.keys())
+    _RATE_CHOICES = _discover_supported_rates()
+except OSError:
+    _AUDIO_DEVICES = {}
+    _AUDIO_CHOICES = ["default"]
+    _RATE_CHOICES = ["48000"]
 
 
 @source_node(
@@ -125,6 +131,7 @@ def microphone(*, state, config, clock):
     device = config["device"]
 
     if "stream" not in state:
+        import sounddevice as sd
         sd_device = None if device == "default" else _AUDIO_DEVICES.get(device, None)
         log.info("opening audio stream: device=%s, rate=%d, chunk=%d", sd_device, sample_rate, chunk_size)
         state["stream"] = sd.InputStream(
