@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68.0", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sigflow"
+description = "Reactive DAG pipeline framework for real-time signal processing"
+requires-python = ">=3.11"
+dynamic = ["version"]
+dependencies = [
+    "numpy>=1.24",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+recording = ["pylsl", "pyxdf"]
+audio = ["sounddevice", "scipy"]
+video = ["opencv-python"]
+all = ["sigflow[recording,audio,video]"]
+dev = ["ruff", "pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools_scm]
+
+[tool.ruff]
+line-length = 99
