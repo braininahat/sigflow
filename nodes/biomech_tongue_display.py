@@ -170,11 +170,21 @@ def _init(state: dict, config: dict) -> None:
         )
 
         # Push a rest-pose vertex buffer so the mesh is visible before tracking starts.
-        tongue.set_activations(np.zeros(len(tongue.activations), dtype=np.float64))
-        tongue.solve(max_iter=config.get("max_iter", 100))
-        rest_buf = tongue.to_vertex_buffer()
-        _display_callback(config["display_id"], "mesh", rest_buf)
-        log.info("biomech tongue: rest pose emitted (%d bytes)", len(rest_buf))
+        # TongueModel.__init__ sets activations to 100.0 which is the rest state;
+        # solver.py computes target_length = rest * pct/100, so pct=100 → rest
+        # length. Using zeros here would collapse every muscle target to 1 mm and
+        # ship a contracted mesh — opus-Quinn flagged this in the task #62 review.
+        try:
+            tongue.set_activations(
+                np.full(len(tongue.activations), 100.0, dtype=np.float64)
+            )
+            tongue.solve(max_iter=config.get("max_iter", 100))
+            rest_buf = tongue.to_vertex_buffer()
+            _display_callback(config["display_id"], "mesh", rest_buf)
+            log.info("biomech tongue: rest pose emitted (%d bytes)", len(rest_buf))
+        except Exception:
+            log.exception("biomech_tongue_display: rest-pose emit failed")
+            state["disabled_permanently"] = True
 
 
 def _finalize_calibration(state: dict) -> None:
