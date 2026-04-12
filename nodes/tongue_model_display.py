@@ -798,11 +798,14 @@ def _init_mesh(state, config):
         Param("mandible_angle_scale", "float", 100.0, label="Mandible Angle Scale"),
         Param("tmj_coupled_factor", "float", 0.3, label="TMJ Coupled Factor (mm/deg)"),
         Param("spline_smoothing", "float", 0.5, label="Spatial Spline Smoothing"),
+        Param("enabled", "bool", True, label="Enable FK+LBS Rendering"),
     ],
 )
 def tongue_model_display(item, *, state, config):
     from sigflow.nodes.app_display import _display_callback
 
+    if not config.get("enabled", True):
+        return
     if "vertices" not in state:
         _init_mesh(state, config)
 
