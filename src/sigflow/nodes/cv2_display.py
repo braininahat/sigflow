@@ -7,8 +7,6 @@ thread-safe for concurrent window operations.
 import threading
 from collections import deque
 
-import cv2
-
 from sigflow.node import sink_node, Param
 from sigflow.types import Port, TimeSeries2D
 
@@ -19,6 +17,7 @@ _display_lock = threading.Lock()
 
 def drain_display_queue() -> bool:
     """Call from the main thread to display queued frames. Returns True if any were shown."""
+    import cv2
     shown = False
     with _display_lock:
         while _display_queue:

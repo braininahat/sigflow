@@ -3,7 +3,6 @@
 Multi-input node: buffers a frame and face landmarks in state,
 draws mesh connections on the frame when both are available.
 """
-import cv2
 import numpy as np
 
 from sigflow.node import process_node, Param
@@ -71,6 +70,7 @@ def mesh_overlay(item, *, state, config):
     px = (landmarks_data[:, 0] * w).astype(np.int32)
     py = (landmarks_data[:, 1] * h).astype(np.int32)
 
+    import cv2
     for start, end in connections:
         cv2.line(frame, (px[start], py[start]), (px[end], py[end]),
                  (0, 255, 0), thickness)

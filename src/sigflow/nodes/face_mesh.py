@@ -8,8 +8,6 @@ import logging
 import threading
 from pathlib import Path
 
-import cv2
-import mediapipe as mp
 import numpy as np
 
 from sigflow.node import process_node
@@ -31,6 +29,8 @@ _detect_lock = threading.Lock()
     category="detection",
 )
 def face_mesh(item, *, state, config):
+    import cv2
+    import mediapipe as mp
     frame = item.data
     h, w = frame.shape[:2]
 
@@ -68,6 +68,7 @@ def face_mesh(item, *, state, config):
 
 @face_mesh.init
 def face_mesh_init(state, config):
+    import mediapipe as mp
     model_path = str(resolve_data_path("weights/face_landmarker.task"))
     base_options = mp.tasks.BaseOptions(model_asset_path=model_path)
     options = mp.tasks.vision.FaceLandmarkerOptions(

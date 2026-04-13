@@ -2,17 +2,10 @@
 import logging
 import sys
 
-import cv2
-
 from sigflow.node import source_node, Param
 from sigflow.types import Port, Sample, CameraFrame
 
 log = logging.getLogger(__name__)
-
-# On Linux, explicitly use V4L2 backend.  Without this, bundled environments
-# (AppImage / PyInstaller) may prefer the FFMPEG backend, which is unreliable
-# for webcam capture and causes select() timeouts.
-_API = cv2.CAP_V4L2 if sys.platform == "linux" else cv2.CAP_ANY
 
 
 @source_node(
@@ -24,6 +17,8 @@ _API = cv2.CAP_V4L2 if sys.platform == "linux" else cv2.CAP_ANY
     ],
 )
 def webcam(*, state, config, clock):
+    import cv2
+    _API = cv2.CAP_V4L2 if sys.platform == "linux" else cv2.CAP_ANY
     if "cap" not in state:
         dev = config["device"]
         log.info("opening camera device %d (backend=%s)", dev, _API)

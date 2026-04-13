@@ -106,7 +106,7 @@ try:
     _AUDIO_DEVICES = _discover_audio_inputs()
     _AUDIO_CHOICES = ["default"] + list(_AUDIO_DEVICES.keys())
     _RATE_CHOICES = _discover_supported_rates()
-except OSError:
+except (OSError, ImportError):
     _AUDIO_DEVICES = {}
     _AUDIO_CHOICES = ["default"]
     _RATE_CHOICES = ["48000"]

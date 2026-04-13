@@ -20,7 +20,6 @@ Lips:
   bottom*inner             → magenta    (lower inner)
   bottom*outer             → purple     (lower outer)
 """
-import cv2
 import numpy as np
 
 from sigflow.node import process_node, Param
@@ -116,6 +115,7 @@ def keypoints_overlay(item, *, state, config):
     else:
         scale_x = scale_y = 1.0
 
+    import cv2
     for i in range(kps.shape[0]):
         x, y, conf = kps[i]
         if conf >= threshold:

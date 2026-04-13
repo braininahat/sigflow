@@ -16,7 +16,6 @@ import logging
 
 import time
 
-import cv2
 import numpy as np
 import yaml
 
@@ -35,6 +34,7 @@ def preprocess_frame(frame: np.ndarray, stride: int) -> np.ndarray:
     Returns NHWC float32 tensor [1, H, W, 3] with dimensions
     rounded up to the nearest multiple of stride.
     """
+    import cv2
     h, w = frame.shape[:2]
     target_h = ((h + stride - 1) // stride) * stride
     target_w = ((w + stride - 1) // stride) * stride
@@ -65,6 +65,7 @@ def postprocess_heatmaps(
         Array of shape (num_joints, 3) with columns [x, y, confidence].
         Coordinates are in pixel space of the preprocessed input.
     """
+    import cv2
     hm = heatmaps[0]  # Remove batch dim → [H, W, J]
     lr = locref[0] if locref is not None else None
     keypoints = np.zeros((num_joints, 3), dtype=np.float32)
@@ -133,6 +134,7 @@ def _dlc_inference(item, *, state, config):
 
     # Resize to model input width if configured (e.g. tongue model needs 320px wide)
     if model_input_width > 0 and orig_w != model_input_width:
+        import cv2
         aspect = orig_w / orig_h
         target_w = model_input_width
         target_h = ((int(target_w / aspect) + stride - 1) // stride) * stride

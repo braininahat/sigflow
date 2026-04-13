@@ -6,8 +6,6 @@ import signal
 import subprocess
 import time
 
-import cv2
-
 log = logging.getLogger(__name__)
 
 
@@ -177,7 +175,7 @@ def wait_for_capture(
     device_path: str,
     proc: subprocess.Popen,
     timeout: float = 15.0,
-) -> cv2.VideoCapture | None:
+) -> "cv2.VideoCapture | None":
     """Retry cv2.VideoCapture until scrcpy starts writing to the V4L2 device.
 
     The loopback device is output-only until scrcpy connects, so
@@ -186,6 +184,7 @@ def wait_for_capture(
 
     Returns an opened VideoCapture on success, None on timeout or crash.
     """
+    import cv2
     idx = device_index(device_path)
     log.info("waiting for capture on %s (device index %d, timeout=%.1fs)", device_path, idx, timeout)
     deadline = time.monotonic() + timeout

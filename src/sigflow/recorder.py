@@ -21,8 +21,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-import imageio_ffmpeg
-
 from sigflow.types import (
     PortType, TimeSeries1D, TimeSeries2D, AudioSignal, Keypoints, FaceLandmarks,
     Scalar, Event, ROI, Sample,
@@ -57,6 +55,7 @@ class RecordingBackend(Protocol):
 
 def _open_ffmpeg_writer(filepath, w, h, fps):
     """Open an ffmpeg subprocess that accepts raw BGR24 frames on stdin."""
+    import imageio_ffmpeg
     cmd = [
         imageio_ffmpeg.get_ffmpeg_exe(), "-y",
         "-f", "rawvideo", "-pix_fmt", "bgr24",

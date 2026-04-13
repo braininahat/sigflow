@@ -1,8 +1,6 @@
 """Sonostar wireless ultrasound source node — uses ProbeClient for transport."""
 import logging
 
-import cv2
-
 from sigflow.node import source_node, Param
 from sigflow.types import Port, Sample, UltrasoundFrame
 
@@ -87,6 +85,7 @@ def sonostar(*, state, config, clock):
         return None
 
     image = renderer.render(probe_frame.to_numpy())
+    import cv2
     bgr = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
     return {"frame": Sample(
         source_id=config["source_id"],
