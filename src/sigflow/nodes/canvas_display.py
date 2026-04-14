@@ -4,7 +4,6 @@ Unlike cv2_display which opens separate OpenCV windows, this node stores
 frames in a module-level dict that the editor reads on the main thread
 to update an embedded QLabel widget inside the node on the graph canvas.
 """
-import cv2
 import numpy as np
 
 from sigflow.node import sink_node, Param
@@ -17,6 +16,7 @@ _canvas_frames: dict[str, np.ndarray] = {}
 
 def _render_1d(data: np.ndarray, width: int = 320, height: int = 240) -> np.ndarray:
     """Render a 1D signal as a waveform image."""
+    import cv2
     img = np.zeros((height, width, 3), dtype=np.uint8)
     if len(data) == 0:
         return img
@@ -34,6 +34,7 @@ def _render_1d(data: np.ndarray, width: int = 320, height: int = 240) -> np.ndar
 
 def _render_2d(data: np.ndarray) -> np.ndarray:
     """Render a 2D array as a colormapped heatmap image."""
+    import cv2
     if data.size == 0:
         return np.zeros((240, 320, 3), dtype=np.uint8)
     dmin, dmax = data.min(), data.max()
@@ -62,6 +63,7 @@ def canvas_display(item, *, state, config):
     elif data.ndim == 2 and data.dtype != np.uint8:
         frame = _render_2d(data)
     elif data.ndim == 2:
+        import cv2
         frame = cv2.cvtColor(data, cv2.COLOR_GRAY2BGR)
     else:
         frame = data

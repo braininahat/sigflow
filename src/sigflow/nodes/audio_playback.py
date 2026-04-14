@@ -10,7 +10,6 @@ from __future__ import annotations
 import logging
 
 import numpy as np
-import sounddevice as sd
 
 from sigflow.node import sink_node
 from sigflow.types import Port, TimeSeries1D
@@ -24,6 +23,8 @@ log = logging.getLogger(__name__)
     category="output",
 )
 def audio_playback(item, *, state, config):
+    import sounddevice as sd
+
     samples = item.data
     if not isinstance(samples, np.ndarray) or len(samples) == 0:
         return

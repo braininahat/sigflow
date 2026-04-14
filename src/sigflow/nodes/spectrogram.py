@@ -3,7 +3,6 @@ import logging
 from collections import deque
 
 import numpy as np
-from scipy import signal as sig
 
 from sigflow.node import process_node, Param
 from sigflow.types import Port, AudioSignal, TimeSeries2D
@@ -26,6 +25,7 @@ def spectrogram(item, *, state, config):
     nperseg = config["nperseg"]
     history = config["history_length"]
 
+    from scipy import signal as sig
     n = min(nperseg, len(item.data))
     f, t, Sxx = sig.spectrogram(item.data, fs=sample_rate, nperseg=n)
 

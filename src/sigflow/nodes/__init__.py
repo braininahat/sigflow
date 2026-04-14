@@ -17,6 +17,7 @@ from sigflow.nodes import face_mesh  # noqa: F401
 from sigflow.nodes import mesh_overlay  # noqa: F401
 from sigflow.nodes import app_display  # noqa: F401
 from sigflow.nodes import tongue_model_display  # noqa: F401
-from sigflow.nodes import llm_inference  # noqa: F401
+from sigflow.nodes import biomech_tongue_display  # noqa: F401
 from sigflow.nodes import tts_synthesis  # noqa: F401
 from sigflow.nodes import audio_playback  # noqa: F401
+from sigflow.nodes import llm_inference  # noqa: F401

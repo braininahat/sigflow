@@ -614,6 +614,11 @@ class Pipeline:
         else:
             log.warning("update_node_config: node '%s' not in pipeline", node_id)
 
+    @property
+    def node_ids(self) -> list[str]:
+        """Return all node IDs in the pipeline."""
+        return list(self._nodes.keys())
+
     def get_node_state(self, node_id: str) -> dict | None:
         """Return the mutable state dict for a node, or None if not found.
 
