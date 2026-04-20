@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sigflow"
 description = "Reactive DAG pipeline framework for real-time signal processing"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dynamic = ["version"]
 dependencies = [
     "numpy>=1.24",
@@ -22,7 +22,7 @@ tts        = ["kokoro-onnx>=0.4"]
 biomech    = ["scipy>=1.11", "neuraloperator>=1.0.2", "torch>=2.0"]
 editor     = ["PySide6>=6.6", "NodeGraphQt>=0.6"]
 scrcpy     = []
-sonostar   = []
+sonostar   = ["sonospy"]
 all = ["sigflow[recording,audio,video,vision,onnx,tts,biomech,editor]"]
 dev = ["ruff", "pytest"]
 
@@ -30,6 +30,9 @@ dev = ["ruff", "pytest"]
 where = ["src"]
 
 [tool.setuptools_scm]
+
+[tool.uv.sources]
+sonospy = { path = "../sonospy", editable = true }
 
 [tool.ruff]
 line-length = 99
