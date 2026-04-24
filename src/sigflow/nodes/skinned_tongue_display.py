@@ -91,12 +91,21 @@ def _init_geometry(state: dict, config: dict) -> None:
     mm_per_model_unit = tongue_length_mm / (bone_z_span + 1e-12)
 
     n = mesh["num_vertices"]
-    buf = np.zeros((n, 12), dtype=np.float32)
-    buf[:, :3] = mesh["vertices"] * mm_per_model_unit   # scale positions to mm
-    buf[:, 3:6] = mesh["normals"]                       # normals are unit vectors — no scale
-    ji_u16 = mesh["joint_indices"].astype(np.uint16)    # (n, 4)
-    buf[:, 6:8] = ji_u16.view(np.float32).reshape(n, 2)
-    buf[:, 8:12] = mesh["joint_weights"]
+    # Stride-56 interleaved layout: pos(12) + normal(12) + joints(16, i32×4) + weights(16, f32×4).
+    # Qt Quick 3D's JointSemantic only accepts I32Type or F32Type for vertex attributes —
+    # U16 is index-only and Qt logs "Attributes cannot be uint16, only index data" then
+    # drops the attribute, leaving every vertex bound to bone 0 (mesh moves as a solid unit).
+    dt = np.dtype([
+        ("pos",     np.float32, 3),
+        ("normal",  np.float32, 3),
+        ("joints",  np.int32,   4),
+        ("weights", np.float32, 4),
+    ])
+    buf = np.zeros(n, dtype=dt)
+    buf["pos"]     = (mesh["vertices"] * mm_per_model_unit).astype(np.float32)
+    buf["normal"]  = mesh["normals"].astype(np.float32)
+    buf["joints"]  = mesh["joint_indices"].astype(np.int32)
+    buf["weights"] = mesh["joint_weights"].astype(np.float32)
     vertex_bytes = buf.tobytes()
 
     index_bytes = mesh["indices"].astype(np.uint32).tobytes()
