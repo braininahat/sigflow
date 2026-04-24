@@ -109,7 +109,8 @@ def _init_geometry(state: dict, config: dict) -> None:
         mat[:3, 3] *= mm_per_model_unit              # translation → mm
         inv_bind_matrices.append(mat.flatten().tolist())
 
-    if _display_callback is not None:
+    jaws_only = bool(config.get("jaws_only", False))
+    if _display_callback is not None and not jaws_only:
         _display_callback(config["display_id"], "mesh_skin", {
             "vertices": vertex_bytes,
             "indices": index_bytes,
@@ -186,6 +187,7 @@ def _emit_joints(state: dict, config: dict, kp_mm: np.ndarray) -> None:
         Param("confidence_threshold",  "float", 0.1,                     label="Min Keypoint Confidence"),
         Param("smooth_alpha",          "float", 0.4,                     label="Slerp EMA Alpha"),
         Param("tongue_length_mm",      "float", 70.0,                    label="Tongue Length (mm)"),
+        Param("jaws_only",             "bool",  False,                   label="Skip tongue mesh (emit jaws only)"),
     ],
 )
 def skinned_tongue_display(item, *, state, config):
@@ -198,6 +200,10 @@ def skinned_tongue_display(item, *, state, config):
         _init_geometry(state, config)
         if state.get("disabled_permanently"):
             return
+
+    # jaws_only: jaw meshes are emitted once at init; no per-frame work after that
+    if config.get("jaws_only", False):
+        return
 
     keypoints = item.data
     if keypoints is None or len(keypoints) < 11:

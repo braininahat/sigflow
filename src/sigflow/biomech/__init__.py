@@ -13,8 +13,21 @@ from .inverse import (
     resample_curve,
     save_inverse_mapping,
 )
+from .mesh import (
+    atom_id_to_idx,
+    compute_vertex_normals,
+    mirror_mesh,
+    triangulate_polygons,
+)
 from .s3d_parser import parse_s3d
 from .types import InverseMapping, MyoSim3D, PCA_LABELS
+from .vertex_inverse import (
+    VertexMapping,
+    build_vertex_mapping,
+    load_vertex_mapping,
+    predict_vertices,
+    save_vertex_mapping,
+)
 
 __all__ = [
     "BiomechGINO",
@@ -22,13 +35,22 @@ __all__ = [
     "MyoSim3D",
     "InverseMapping",
     "PCA_LABELS",
-    "parse_s3d",
+    "VertexMapping",
+    "atom_id_to_idx",
     "build_inverse_mapping",
+    "build_vertex_mapping",
+    "compute_vertex_normals",
     "load_inverse_mapping",
-    "save_inverse_mapping",
+    "load_vertex_mapping",
+    "mirror_mesh",
+    "parse_s3d",
     "predict_activations",
+    "predict_vertices",
     "resample_curve",
+    "save_inverse_mapping",
+    "save_vertex_mapping",
     "solve_equilibrium",
     "solve_equilibrium_batch",
     "solve_equilibrium_rollout",
+    "triangulate_polygons",
 ]
