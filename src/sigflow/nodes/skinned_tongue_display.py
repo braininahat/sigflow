@@ -217,14 +217,10 @@ def skinned_tongue_display(item, *, state, config):
     keypoints = item.data
     if keypoints is None or len(keypoints) < 11:
         return
-    # Reverse dorsal ordering so keypoint 0 maps to bone 0 (root/posterior).
-    # DLC outputs vallecula (root) → tongueTip2 (anterior), but the GLB's bone
-    # chain is ordered tip → root in the GLTF skin joint list.  Without the
-    # reversal, every per-segment rotation computed by _emit_joints drives the
-    # wrong bone, producing accordion-scrunched tongue deformation once the
-    # i32 JointSemantic fix (sigflow #6) made per-vertex skinning actually
-    # apply bone weights.
-    dorsal = keypoints[:11][::-1]
+    # DLC outputs 11 dorsal keypoints vallecula (root, z-) → tongueTip2 (anterior, z+).
+    # TongueBond.glb's 11 dorsal bones are also ordered root → tip (bone 0 at z≈-2.2,
+    # bone 10 at z≈+4.0 in model units), so keypoint i drives bone i directly.
+    dorsal = keypoints[:11]
     if float(dorsal[:, 2].mean()) < float(config.get("confidence_threshold", 0.1)):
         return
 
