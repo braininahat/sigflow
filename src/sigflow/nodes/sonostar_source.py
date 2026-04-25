@@ -1,5 +1,6 @@
 """Sonostar wireless ultrasound source node — uses ProbeClient for transport."""
 import logging
+import time
 
 from sigflow.node import source_node, Param
 from sigflow.types import Port, Sample, UltrasoundFrame
@@ -8,6 +9,7 @@ log = logging.getLogger(__name__)
 
 _RENDER_PARAMS = ("gray_map", "persistence", "median", "coherence", "morph_close")
 _ZOOM_MM_PER_SAMPLE = {0: 0.039, 1: 0.078, 2: 0.117, 3: 0.195}
+_STATS_LOG_INTERVAL_S = 1.0
 
 
 @source_node(
@@ -79,20 +81,49 @@ def sonostar(*, state, config, clock):
         state["renderer"] = renderer = _build_renderer(config)
         state["_frame_metadata"] = _compute_frame_metadata(renderer)
 
-    # Read next frame from ProbeClient queue
-    probe_frame = client.read_frame(timeout=0.001)
+    # Read next frame from ProbeClient queue.  10 ms wait (was 1 ms) — the
+    # client's recv thread is independent so a slightly longer poll here
+    # doesn't delay capture; it just trims empty-poll overhead in this loop.
+    probe_frame = client.read_frame(timeout=0.010)
     if probe_frame is None:
         return None
 
     image = renderer.render(probe_frame.to_numpy())
     import cv2
     bgr = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+
+    # Snapshot probe-side stats (drop-rate, reconnects).  Cheap dict copy.
+    stats = client.stats() if hasattr(client, "stats") else {}
+    metadata = dict(state["_frame_metadata"])
+    metadata["sonospy_stats"] = stats
+    metadata["dropped_lines"] = getattr(probe_frame, "dropped_lines", 0)
+
+    # Aggregate log line at ~1 Hz so drop-rate is visible without flooding.
+    now = time.monotonic()
+    last_log = state.get("_stats_last_log", 0.0)
+    if now - last_log >= _STATS_LOG_INTERVAL_S:
+        last_stats = state.get("_stats_last_snapshot", {})
+        d_frames = stats.get("frames_emitted", 0) - last_stats.get("frames_emitted", 0)
+        d_drop_frames = stats.get("frames_with_dropouts", 0) - last_stats.get("frames_with_dropouts", 0)
+        d_drop_lines = stats.get("dropped_lines_total", 0) - last_stats.get("dropped_lines_total", 0)
+        d_reconnect = stats.get("reconnect_count", 0) - last_stats.get("reconnect_count", 0)
+        if d_frames > 0:
+            log.info(
+                "sonospy stats: %d frames/s (%.1f%% w/ drops, %d lines lost, %d reconnects)",
+                d_frames,
+                100.0 * d_drop_frames / d_frames,
+                d_drop_lines,
+                d_reconnect,
+            )
+        state["_stats_last_log"] = now
+        state["_stats_last_snapshot"] = stats
+
     return {"frame": Sample(
         source_id=config["source_id"],
         lsl_timestamp=clock.lsl_now(),
         session_time_ms=clock.session_time_ms(),
         data=bgr,
-        metadata=state["_frame_metadata"],
+        metadata=metadata,
         port_type=UltrasoundFrame,
     )}
 
