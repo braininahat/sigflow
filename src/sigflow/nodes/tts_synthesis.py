@@ -81,10 +81,18 @@ def tts_synthesis(item, *, state, config):
     samples, sr = state["kokoro"].create(text, voice=voice, speed=speed, lang="en-us")
     latency_ms = (time.perf_counter() - t0) * 1000
 
+    if not isinstance(samples, np.ndarray) or samples.size == 0:
+        log.error("TTS produced empty waveform — text=%r voice=%s", text[:60], voice)
+        raise RuntimeError(f"kokoro returned empty audio for voice={voice}")
+
     duration_s = len(samples) / sr
     realtime_factor = duration_s / (latency_ms / 1000) if latency_ms > 0 else 0
+    abs_mean = float(np.abs(samples).mean())
 
-    log.info("TTS: %s (%.0fms, %.1fs audio, %.1fx RT)", repr(text[:60]), latency_ms, duration_s, realtime_factor)
+    log.info(
+        "TTS: %s (%.0fms, %.1fs @%dHz voice=%s, %.1fx RT, |mean|=%.4f)",
+        repr(text[:60]), latency_ms, duration_s, sr, voice, realtime_factor, abs_mean,
+    )
 
     return {"audio": item.replace(
         data=samples,

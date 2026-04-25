@@ -21,6 +21,10 @@ from pathlib import Path
 import numpy as np
 
 from sigflow.node import sink_node, Param
+from sigflow.nodes.tongue_targets import (
+    AnatomicalTargetParams,
+    compute_anatomical_targets,
+)
 from sigflow.types import Port, Keypoints, FaceLandmarks
 
 log = logging.getLogger(__name__)
@@ -786,11 +790,24 @@ def _init_mesh(state, config):
         Param("display_id", "str", "tongue_model", label="Display Target"),
         Param("model_path", "str", "assets/TongueBond.glb", label="Model Path"),
         Param("confidence_threshold", "float", 0.1, label="Min Confidence"),
+        # Confidence-weighted target blend (tongue_targets.py)
+        Param("confidence_soft_range", "float", 0.4, label="Confidence Soft Range"),
+        # Per-bone stiffness / displacement ramps. Root values are stiffer
+        # than tip — anatomically the tongue body is anchored, the tip free.
+        Param("stiffness_root", "float", 0.5, label="Stiffness (root)"),
+        Param("stiffness_tip", "float", 0.1, label="Stiffness (tip)"),
+        Param("max_displacement_root_mm", "float", 8.0, label="Max Disp Root (mm)"),
+        Param("max_displacement_tip_mm", "float", 25.0, label="Max Disp Tip (mm)"),
+        # Arc-length / muscular-hydrostat conservation
+        Param("arc_length_min_ratio", "float", 0.92, label="Arc-Length Min Ratio"),
+        Param("arc_length_max_ratio", "float", 1.08, label="Arc-Length Max Ratio"),
+        # Legacy uniform stiffness — kept so existing YAML protocols keep
+        # parsing; superseded by the per-bone ramp above and ignored.
+        Param("stiffness", "float", 0.1, label="(deprecated)"),
+        Param("max_displacement_mm", "float", 25.0, label="(deprecated)"),
         Param("tongue_length_mm", "float", 70.0, label="Reference Tongue Length (mm)"),
         Param("smooth_min_cutoff", "float", 1.0, label="Smoothing (lower=smoother)"),
         Param("smooth_beta", "float", 0.007, label="Smoothing Speed Adapt"),
-        Param("stiffness", "float", 0.1, label="Rest-Pose Stiffness"),
-        Param("max_displacement_mm", "float", 25.0, label="Max Displacement (mm)"),
         Param("phase", "str", "calibration", label="Current Phase"),
         Param("calibration_min_frames", "int", 30, label="Min Calibration Frames"),
         Param("mandible_angle_scale", "float", 100.0, label="Mandible Angle Scale"),
@@ -910,16 +927,38 @@ def tongue_model_display(item, *, state, config):
     # Displacement in US mm-space
     delta_mm = kp_mm - ref_kp_mm  # (11, 2)
 
-    # Map displacement to model space, add to rest positions
+    # Map displacement to model space, add to rest positions — these are the
+    # *raw DLC-derived* targets, before any anatomical constraints.
     rest_pos = state["dorsal_rest_positions"]
-    target = rest_pos.copy()
-    target[:, 2] += delta_mm[:, 0]     # US X disp → model Z
-    target[:, 1] += -delta_mm[:, 1]    # US Y disp → model -Y
+    dlc_targets = rest_pos.copy()
+    dlc_targets[:, 2] += delta_mm[:, 0]     # US X disp → model Z
+    dlc_targets[:, 1] += -delta_mm[:, 1]    # US Y disp → model -Y
 
     # Spatial spline smoothing (treat keypoints as spline handles)
     spline_s = config.get("spline_smoothing", 0.5)
     if spline_s > 0:
-        target = _smooth_targets_spline(target, smoothing=spline_s)
+        dlc_targets = _smooth_targets_spline(dlc_targets, smoothing=spline_s)
+
+    # Anatomical-target pipeline: confidence-weighted blend, per-bone
+    # stiffness ramp (root stiff, tip free), arc-length conservation.
+    # See sigflow/nodes/tongue_targets.py for the full rationale.
+    anatomical_params = AnatomicalTargetParams(
+        confidence_threshold=config.get("confidence_threshold", 0.1),
+        confidence_soft_range=config.get("confidence_soft_range", 0.4),
+        stiffness_root=config.get("stiffness_root", 0.5),
+        stiffness_tip=config.get("stiffness_tip", 0.1),
+        max_displacement_root_mm=config.get("max_displacement_root_mm", 8.0),
+        max_displacement_tip_mm=config.get("max_displacement_tip_mm", 25.0),
+        arc_length_min_ratio=config.get("arc_length_min_ratio", 0.92),
+        arc_length_max_ratio=config.get("arc_length_max_ratio", 1.08),
+    )
+    target = compute_anatomical_targets(
+        dlc_targets=dlc_targets,
+        rest_positions=rest_pos,
+        confidences=confidence,
+        rest_bone_lengths=state["rest_bone_lengths"],
+        params=anatomical_params,
+    )
 
     # Head rotation (SVD Procrustes delta from calibration)
     ref_pose = state.get("ref_pose_pts")
@@ -954,12 +993,11 @@ def tongue_model_display(item, *, state, config):
         flat = _one_euro_filter("smooth", state, flat, t, min_cutoff, beta, d_cutoff=1.0)
         target = flat.reshape(11, 3)
 
-    # Rigidity constraints (stiffness + displacement clamp)
-    stiffness = config.get("stiffness", 0.1)
-    max_disp = config.get("max_displacement_mm", 25.0)
-    target = _apply_rigidity(target, rest_pos, stiffness, max_disp)
-
-    # Anatomical constraints
+    # Per-bone rigidity + arc-length conservation already applied by
+    # compute_anatomical_targets above. Curvature + min-bone-distance
+    # constraints still run here — they catch edge cases the per-joint
+    # rigidity ramp can't (e.g., two consecutive valid keypoints that
+    # both have high confidence but disagree on direction).
     target = _apply_constraints(target)
 
     # Compute bone world transforms (connected-chain FK with preserved bone lengths)

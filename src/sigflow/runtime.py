@@ -208,16 +208,39 @@ class NodeInstance:
         self._failed = False
         self._consecutive_errors = 0
 
+    # Cap the pending-frames map per-node.  The scheduler may not drain
+    # fast enough under load; without a cap the dict grows unbounded
+    # (one entry per frame_id × port-set), which both leaks memory and
+    # delays new frames behind already-stale ones.
+    MAX_PENDING_FRAMES = 30
+
     def on_input(self, port_name: str, sample: Sample) -> None:
         """Thread-safe: insert sample into pending map and notify scheduler."""
         if self._failed:
             return
         log.debug("on_input: %s.%s fid=%d (pending=%d)", self.node_id, port_name, sample.frame_id, len(self._pending))
+        dropped_oldest: int | None = None
         with self._lock:
             self._pending.setdefault(sample.frame_id, {})[port_name] = sample
             pending_size = len(self._pending)
+            if pending_size > self.MAX_PENDING_FRAMES:
+                # Drop the oldest pending frame_id to make room.  Old frame
+                # is by definition stale (its peers will never arrive).
+                oldest_fid = min(self._pending)
+                self._pending.pop(oldest_fid, None)
+                dropped_oldest = oldest_fid
+                pending_size = len(self._pending)
             if pending_size > 10 and pending_size % 10 == 0:
                 log.warning("node '%s' pending backlog: %d frames", self.node_id, pending_size)
+        if dropped_oldest is not None:
+            now = time.monotonic()
+            last = self._last_drop_warn_t if hasattr(self, "_last_drop_warn_t") else 0.0
+            if now - last >= 1.0:
+                log.warning(
+                    "node '%s' pending overflow > %d — dropped frame_id %d",
+                    self.node_id, self.MAX_PENDING_FRAMES, dropped_oldest,
+                )
+                self._last_drop_warn_t = now
         self._pipeline._schedule_node(self)
 
     def _invoke(self, items: dict[str, Sample]) -> None:
