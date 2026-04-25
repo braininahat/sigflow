@@ -202,84 +202,6 @@ def _finalize_calibration(state):
              len(cal_frames), state["ref_jaw_opening"], state["ref_mouth_open"])
 
 
-def _apply_constraints(target_positions, max_angle_deg=60.0, min_bone_dist=1.0):
-    """Apply anatomical constraints to target bone positions (in-place).
-
-    - Max curvature: limit angle between consecutive bone segments
-    - Min bone distance: prevent adjacent targets from collapsing
-    """
-    n = len(target_positions)
-    cos_max = np.cos(np.radians(max_angle_deg))
-
-    # Min bone distance — push apart if too close
-    for i in range(n - 1):
-        d = target_positions[i + 1] - target_positions[i]
-        dist = np.linalg.norm(d)
-        if dist < min_bone_dist:
-            if dist < 1e-6:
-                # Degenerate — nudge along Z
-                d = np.array([0.0, 0.0, min_bone_dist], dtype=np.float32)
-            else:
-                d = d / dist * min_bone_dist
-            target_positions[i + 1] = target_positions[i] + d
-
-    # Max curvature — clamp angle between consecutive segments
-    for i in range(1, n - 1):
-        v1 = target_positions[i] - target_positions[i - 1]
-        v2 = target_positions[i + 1] - target_positions[i]
-        n1 = np.linalg.norm(v1)
-        n2 = np.linalg.norm(v2)
-        if n1 < 1e-6 or n2 < 1e-6:
-            continue
-        v1_hat = v1 / n1
-        v2_hat = v2 / n2
-        cos_angle = np.dot(v1_hat, v2_hat)
-        if cos_angle < cos_max:
-            # Rotate v2 toward v1 direction until angle = max_angle
-            # Project v2 onto plane perpendicular to v1, blend
-            axis = np.cross(v1_hat, v2_hat)
-            axis_norm = np.linalg.norm(axis)
-            if axis_norm < 1e-8:
-                continue
-            axis /= axis_norm
-            sin_max = np.sin(np.radians(max_angle_deg))
-            new_dir = v1_hat * cos_max + np.cross(axis, v1_hat) * sin_max
-            new_dir /= np.linalg.norm(new_dir) + 1e-12
-            target_positions[i + 1] = target_positions[i] + new_dir * n2
-
-    return target_positions
-
-
-def _apply_rigidity(target_positions, rest_positions, stiffness, max_displacement_mm):
-    """Blend targets toward rest pose and clamp max displacement.
-
-    Args:
-        target_positions: (11, 3) current targets
-        rest_positions: (11, 3) rest-pose positions
-        stiffness: 0.0–1.0, fraction blended toward rest pose
-        max_displacement_mm: max distance any joint can deviate from rest
-
-    Returns:
-        (11, 3) constrained targets
-    """
-    # Rest-pose stiffness blend
-    if stiffness > 0:
-        target_positions = (
-            (1 - stiffness) * target_positions + stiffness * rest_positions
-        )
-
-    # Max displacement clamp
-    if max_displacement_mm > 0:
-        delta = target_positions - rest_positions
-        dist = np.linalg.norm(delta, axis=1, keepdims=True)
-        mask = dist > max_displacement_mm
-        if mask.any():
-            clamped = delta / (dist + 1e-12) * max_displacement_mm
-            target_positions = np.where(mask, rest_positions + clamped, target_positions)
-
-    return target_positions
-
-
 def _compute_bone_transforms(target_positions, rest_transforms, rest_bone_lengths, num_dorsal=11):
     """Compute world transforms via connected-chain FK with preserved bone lengths.
 
@@ -993,12 +915,9 @@ def tongue_model_display(item, *, state, config):
         flat = _one_euro_filter("smooth", state, flat, t, min_cutoff, beta, d_cutoff=1.0)
         target = flat.reshape(11, 3)
 
-    # Per-bone rigidity + arc-length conservation already applied by
-    # compute_anatomical_targets above. Curvature + min-bone-distance
-    # constraints still run here — they catch edge cases the per-joint
-    # rigidity ramp can't (e.g., two consecutive valid keypoints that
-    # both have high confidence but disagree on direction).
-    target = _apply_constraints(target)
+    # Curvature + min-bone-distance constraints now run inside
+    # compute_anatomical_targets above (single source of truth for both
+    # CPU LBS and GPU Skin paths).
 
     # Compute bone world transforms (connected-chain FK with preserved bone lengths)
     bone_transforms = _compute_bone_transforms(

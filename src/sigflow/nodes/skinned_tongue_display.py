@@ -1,29 +1,27 @@
 """Qt Quick 3D GPU-skinning tongue display.
 
-The earlier implementation extracted **2D rotations** from segment-pair
-geometry in the ultrasound (x, y) plane and packed them as quaternions
-``(cos(θ/2), sin(θ/2), 0, 0)`` — a rotation purely about the model's X
-axis. With Y and Z components forced to zero the chain could only flex in
-a single plane, which is the cause of the "scrunched" geometry the user
-observed.
+Emits the **same** bone world transforms that the NumPy LBS path consumes
+in :mod:`sigflow.nodes.tongue_model_display`, decomposed into one position
++ one quaternion per joint. The QML scene sets each bone Node's
+``position`` and ``rotation`` from these, so ``joint.sceneTransform``
+equals ``bone_world[i]`` and Qt Quick 3D's ``Skin`` deformation collapses
+to the identical math the CPU LBS uses.
 
-Current implementation:
+Pipeline per frame:
 
 1. Build full 3D target positions for the dorsal joints, mapping
    ultrasound delta into model space (US x → model Z, US y → −model Y).
 2. Run the shared anatomical-target pipeline
-   (``sigflow.nodes.tongue_targets.compute_anatomical_targets``) — same
-   confidence-weighted blend, per-bone stiffness ramp, arc-length
-   conservation as the NumPy LBS path. This guarantees the two skinning
-   paths consume identical anatomical targets.
-3. Apply temporal smoothing on **target positions** (one-euro filter)
-   rather than on rotations after the fact — smoothing positions before
-   rotation derivation is more stable than smoothing rotations.
-4. Run connected-chain FK (``compute_chain_fk``) to get bone world
-   transforms with rest-pose bone lengths preserved.
-5. For each joint, compute the local-space rotation quaternion as
-   ``R_rest⁻¹ · R_world`` (``world_to_local_quaternion``), which is what
-   Qt Quick 3D's ``Skin`` component expects.
+   (``compute_anatomical_targets`` — confidence-weighted blend,
+   per-bone stiffness ramp, arc-length conservation, curvature limit +
+   min bone distance). Single source of truth shared with the LBS path.
+3. Apply temporal smoothing on **target positions** (one-euro filter).
+4. Run connected-chain FK (``compute_chain_fk``) for ``bone_world``.
+5. Emit per-joint world ``position`` (``bone_world[i, :3, 3]``) and
+   world ``rotation`` (``rotation_matrix_to_quaternion(bone_world[i,
+   :3, :3])``) via display callbacks ``tongue_joint_positions`` and
+   ``tongue_joints``. Ventral joints (11–18) emit their rest-pose
+   transform.
 """
 from __future__ import annotations
 
@@ -36,7 +34,7 @@ from sigflow.nodes.tongue_targets import (
     AnatomicalTargetParams,
     compute_anatomical_targets,
     compute_chain_fk,
-    world_to_local_quaternion,
+    rotation_matrix_to_quaternion,
 )
 from sigflow.types import Keypoints, Port
 
@@ -252,19 +250,25 @@ def _emit_joints(state: dict, config: dict, kp_mm_2d: np.ndarray, conf: np.ndarr
         targets, bone_rest_world, rest_bone_lengths, num_dorsal=11,
     )
 
-    # Convert each bone's world transform to a *local* quaternion
-    # (R_rest_inv · R_world). Qt Quick 3D's Skin expects local rotations.
-    # Dorsal joints 0–10 are articulated; ventral joints 11–18 stay at
-    # rest, which means identity quaternion.
+    # Decompose each bone's world transform into (position, world rotation
+    # quaternion).  QML sets bone.position + bone.rotation so that
+    # joint.sceneTransform == bone_world[i] exactly, matching the CPU LBS
+    # path which consumes bone_world directly.  Ventral joints 11–18 stay
+    # at their rest-pose transforms (rest position, rest rotation).
+    positions: list[tuple[float, float, float]] = []
     quats: list[tuple[float, float, float, float]] = []
-    for i in range(min(11, num_joints)):
-        q = world_to_local_quaternion(bone_world[i], bone_rest_world[i])
-        quats.append(q)
-    for _ in range(11, num_joints):
-        quats.append((1.0, 0.0, 0.0, 0.0))
+    for i in range(num_joints):
+        if i < 11:
+            world = bone_world[i]
+        else:
+            world = bone_rest_world[i]
+        p = world[:3, 3]
+        positions.append((float(p[0]), float(p[1]), float(p[2])))
+        quats.append(rotation_matrix_to_quaternion(world[:3, :3]))
 
     from sigflow.nodes.app_display import _display_callback
     if _display_callback:
+        _display_callback(config["display_id"], "tongue_joint_positions", positions)
         _display_callback(config["display_id"], "tongue_joints", quats)
 
 
