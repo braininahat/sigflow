@@ -469,6 +469,14 @@ def _load_rest_pose(state, scaled_static):
 
     state["jaw_close_offset"] = jaw_open
 
+    # The articulator's preview rotates the LJ around `tmj_base + uj_offset`,
+    # which can't be reconstructed from the post-transform UJ/LJ vertices that
+    # the runtime sees here (uj_rot in particular changes the UJ y-min that
+    # the auto-TMJ formula depends on).  When the articulator saved a TMJ
+    # explicitly we use it verbatim so the rotation pivot matches the preview.
+    if "tmj_position" in saved.files:
+        state["tmj_position"] = saved["tmj_position"].astype(np.float32)
+
     log.info("rest pose loaded: dorsal %s, uj_rot=%.1f°, jaw_open=%.1f°, lj_scale=%.2f",
              dorsal_pos.shape, uj_rot, jaw_open, lj_y_scale)
     return True
@@ -678,30 +686,32 @@ def _init_mesh(state, config):
 
     # Detect TMJ pivot: above and behind the lower jaw's posterior edge.
     # Anatomically the TMJ sits at ear level, behind the last molar.
-    if "lower_jaw" in scaled_static:
-        jaw_verts = scaled_static["lower_jaw"]["vertices"]
-        # X: laterally centered
-        tmj_x = jaw_verts[:, 0].mean()
-        # Z: behind the most posterior point of the lower jaw
-        tmj_z = jaw_verts[:, 2].min() - 5.0
-        # Y: above the jaw — use upper jaw floor if available, else top of lower jaw + margin
-        if "upper_jaw" in scaled_static:
-            tmj_y = scaled_static["upper_jaw"]["vertices"][:, 1].min() + 5.0
+    # _load_rest_pose may have already populated tmj_position from the
+    # articulator's saved npz — in that case the saved value wins because
+    # it matches the rotation pivot the user actually saw in the preview.
+    if "tmj_position" not in state:
+        if "lower_jaw" in scaled_static:
+            jaw_verts = scaled_static["lower_jaw"]["vertices"]
+            tmj_x = jaw_verts[:, 0].mean()
+            tmj_z = jaw_verts[:, 2].min() - 5.0
+            if "upper_jaw" in scaled_static:
+                tmj_y = scaled_static["upper_jaw"]["vertices"][:, 1].min() + 5.0
+            else:
+                tmj_y = jaw_verts[:, 1].max() + 5.0
+            state["tmj_position"] = np.array([tmj_x, tmj_y, tmj_z], dtype=np.float32)
         else:
-            tmj_y = jaw_verts[:, 1].max() + 5.0
-        tmj = np.array([tmj_x, tmj_y, tmj_z], dtype=np.float32)
-        state["tmj_position"] = tmj
-    else:
-        state["tmj_position"] = state["dorsal_rest_positions"][0] + np.array([0, 15, -5], dtype=np.float32)
+            state["tmj_position"] = state["dorsal_rest_positions"][0] + np.array([0, 15, -5], dtype=np.float32)
     if _display_callback:
         _display_callback(display_id, "tmj_position", state["tmj_position"])
 
-    # Jaw is already aligned via translation; no rotation offset needed.
-    # mandible_angle=0 → closed, positive → opening.
-    state["jaw_close_offset"] = 0.0
+    # jaw_close_offset is set by _load_rest_pose if a saved pose exists
+    # (= the articulator's saved jaw_open).  Default to 0 (neutral) only if
+    # no saved pose was found, so the saved closure isn't silently clobbered.
+    state.setdefault("jaw_close_offset", 0.0)
 
-    log.info("tongue model loaded: %d vertices, %d joints (mm-space), tmj=%s",
-             mesh["num_vertices"], mesh["num_joints"], state["tmj_position"])
+    log.info("tongue model loaded: %d vertices, %d joints (mm-space), tmj=%s, jaw_close=%.1f°",
+             mesh["num_vertices"], mesh["num_joints"], state["tmj_position"],
+             state["jaw_close_offset"])
 
 
 @sink_node(
