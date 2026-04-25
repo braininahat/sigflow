@@ -28,10 +28,11 @@ The pipeline runs in this order each frame:
    muscular-hydrostat model (``sigflow.biomech.forward_solver``) without
    reaching into that runtime path.
 
-The two existing utilities (curvature limit + min bone distance) live in
-``tongue_model_display._apply_constraints`` and are still applied
-externally — this module deliberately concerns itself only with the new
-constraints, so layering remains explicit at the call sites.
+4. **Curvature limit + min bone distance** — clamps the angle between
+   consecutive segments to ``max_angle_deg`` and pushes adjacent targets
+   apart if they're closer than ``min_bone_dist``. Catches edge cases the
+   per-bone rigidity ramp can't (two high-confidence neighbours that
+   disagree on direction, or near-coincident keypoints).
 """
 from __future__ import annotations
 
@@ -214,6 +215,61 @@ def arc_length_conserve(
     return out.astype(np.float32)
 
 
+def apply_chain_constraints(
+    target_positions: np.ndarray,
+    max_angle_deg: float = 60.0,
+    min_bone_dist: float = 1.0,
+) -> np.ndarray:
+    """Clamp inter-segment angle and push adjacent targets apart.
+
+    Two passes, in order:
+
+    1. **Min bone distance** — if consecutive targets are closer than
+       ``min_bone_dist``, push the second one outward along the segment
+       direction (or along world Z if degenerate).
+    2. **Max curvature** — if the angle between two consecutive segments
+       exceeds ``max_angle_deg``, rotate the second segment toward the
+       first until the angle equals the cap.
+
+    Operates in-place on the input array (also returned for chaining).
+    """
+    n = len(target_positions)
+    cos_max = np.cos(np.radians(max_angle_deg))
+
+    for i in range(n - 1):
+        d = target_positions[i + 1] - target_positions[i]
+        dist = np.linalg.norm(d)
+        if dist < min_bone_dist:
+            if dist < 1e-6:
+                d = np.array([0.0, 0.0, min_bone_dist], dtype=np.float32)
+            else:
+                d = d / dist * min_bone_dist
+            target_positions[i + 1] = target_positions[i] + d
+
+    for i in range(1, n - 1):
+        v1 = target_positions[i] - target_positions[i - 1]
+        v2 = target_positions[i + 1] - target_positions[i]
+        n1 = np.linalg.norm(v1)
+        n2 = np.linalg.norm(v2)
+        if n1 < 1e-6 or n2 < 1e-6:
+            continue
+        v1_hat = v1 / n1
+        v2_hat = v2 / n2
+        cos_angle = np.dot(v1_hat, v2_hat)
+        if cos_angle < cos_max:
+            axis = np.cross(v1_hat, v2_hat)
+            axis_norm = np.linalg.norm(axis)
+            if axis_norm < 1e-8:
+                continue
+            axis /= axis_norm
+            sin_max = np.sin(np.radians(max_angle_deg))
+            new_dir = v1_hat * cos_max + np.cross(axis, v1_hat) * sin_max
+            new_dir /= np.linalg.norm(new_dir) + 1e-12
+            target_positions[i + 1] = target_positions[i] + new_dir * n2
+
+    return target_positions
+
+
 def build_look_along_y(position: np.ndarray, direction: np.ndarray) -> np.ndarray:
     """4×4 transform with Y axis along ``direction``, origin at ``position``.
 
@@ -298,25 +354,27 @@ def world_to_local_quaternion(
     world: np.ndarray,
     rest_world: np.ndarray,
 ) -> tuple[float, float, float, float]:
-    """Return the local-space rotation quaternion (w, x, y, z) for a bone
-    given its current world transform and rest-pose world transform.
+    """Local rotation quaternion of ``world`` relative to ``rest_world``.
 
-    Qt Quick 3D's ``Skin`` component takes per-joint local rotations
-    (relative to the bone's bind pose), so we compute
-    ``Q_local = R_rest⁻¹ · R_world`` as a quaternion.
-
-    Both inputs are 4×4 row-major; only the upper-left 3×3 (rotation) is
-    used.  The returned quaternion is in (w, x, y, z) Hamilton order, matching
-    the GLB / Qt Quaternion convention.
+    Computes ``R_rest⁻¹ · R_world`` (rest is orthonormal so transpose =
+    inverse) and returns it as a (w, x, y, z) Hamilton quaternion. Both
+    inputs are 4×4 row-major; only the upper-left 3×3 is used. Kept as
+    a thin wrapper around :func:`rotation_matrix_to_quaternion` for
+    callers that still want the world→local form.
     """
-    R_world = world[:3, :3]
-    R_rest = rest_world[:3, :3]
-    R_local = R_rest.T @ R_world  # rest is orthonormal, so transpose = inverse
+    R_local = rest_world[:3, :3].T @ world[:3, :3]
+    return rotation_matrix_to_quaternion(R_local)
 
-    # Convert R_local (3×3) -> quaternion via Shepperd's method (numerically stable).
-    m00, m01, m02 = R_local[0]
-    m10, m11, m12 = R_local[1]
-    m20, m21, m22 = R_local[2]
+
+def rotation_matrix_to_quaternion(R: np.ndarray) -> tuple[float, float, float, float]:
+    """Convert a 3×3 rotation matrix to a (w, x, y, z) Hamilton quaternion.
+
+    Shepperd's method (numerically stable across all rotation regimes).
+    The returned quaternion is normalized.
+    """
+    m00, m01, m02 = R[0]
+    m10, m11, m12 = R[1]
+    m20, m21, m22 = R[2]
     trace = m00 + m11 + m22
     if trace > 0:
         s = 0.5 / np.sqrt(trace + 1.0)
@@ -389,4 +447,5 @@ def compute_anatomical_targets(
         min_ratio=params.arc_length_min_ratio,
         max_ratio=params.arc_length_max_ratio,
     )
+    targets = apply_chain_constraints(targets)
     return targets
