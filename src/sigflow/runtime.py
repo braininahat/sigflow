@@ -59,117 +59,6 @@ class MasterClock:
 
 
 # ---------------------------------------------------------------------------
-# Source ancestry analysis (static, at start())
-# ---------------------------------------------------------------------------
-
-def _port_ancestor_sources(
-    node_id: str, port_name: str,
-    connections: list[Connection], nodes: dict,
-) -> set[str]:
-    """Trace backward from node_id.port_name to find all feeding source nodes."""
-    sources: set[str] = set()
-    visited: set[tuple[str, str, str, str]] = set()
-    stack = [(node_id, port_name)]
-    while stack:
-        nid, pname = stack.pop()
-        for conn in connections:
-            if conn.dst_id == nid and conn.dst_port == pname:
-                edge = (conn.src_id, conn.src_port, conn.dst_id, conn.dst_port)
-                if edge in visited:
-                    continue
-                visited.add(edge)
-                if nodes[conn.src_id]._spec.kind == "source":
-                    sources.add(conn.src_id)
-                else:
-                    for c2 in connections:
-                        if c2.dst_id == conn.src_id:
-                            stack.append((conn.src_id, c2.dst_port))
-    return sources
-
-
-def _compute_source_ancestry(
-    nodes: dict, connections: list[Connection],
-) -> dict[str, str]:
-    """Determine matching strategy per node based on source ancestry.
-
-    Returns dict mapping node_id to strategy:
-    - "source": source node (no matching needed)
-    - "single": 0 or 1 connected input port
-    - "generation": all input ports trace to same source(s) -> match by frame_id
-    - "latest": input ports trace to different sources -> take latest per port
-    """
-    strategies: dict[str, str] = {}
-    for node_id, node in nodes.items():
-        if node._spec.kind == "source":
-            strategies[node_id] = "source"
-            continue
-        connected = node._connected_ports
-        if len(connected) <= 1:
-            strategies[node_id] = "single"
-            continue
-        per_port = [
-            _port_ancestor_sources(node_id, pname, connections, nodes)
-            for pname in connected
-        ]
-        if all(s == per_port[0] for s in per_port[1:]) and per_port[0]:
-            strategies[node_id] = "generation"
-        else:
-            strategies[node_id] = "latest"
-    for node_id, strategy in strategies.items():
-        log.debug("match strategy: %s → %s", node_id, strategy)
-    return strategies
-
-
-# ---------------------------------------------------------------------------
-# Generation firing rules
-# ---------------------------------------------------------------------------
-
-def _check_fireable(
-    pending: dict[int, dict[str, Sample]], n_required: int, strategy: str,
-) -> tuple[int, dict[str, Sample]] | None:
-    """Find latest complete generation in pending map.
-
-    Returns (frame_id, fire_set) or None.
-    """
-    if not pending:
-        return None
-
-    if strategy == "single":
-        fid = max(pending)
-        log.debug("fireable: single fid=%d", fid)
-        return (fid, pending[fid])
-
-    if strategy == "generation":
-        for fid in sorted(pending, reverse=True):
-            if len(pending[fid]) >= n_required:
-                log.debug("fireable: generation fid=%d (%d/%d ports)", fid, len(pending[fid]), n_required)
-                return (fid, pending[fid])
-        return None
-
-    # "latest": collect most recent sample per port
-    latest: dict[str, Sample] = {}
-    for fid in sorted(pending):
-        for port_name, sample in pending[fid].items():
-            latest[port_name] = sample
-    if len(latest) >= n_required:
-        log.debug("fireable: latest fid=%d (%d/%d ports)", max(pending), len(latest), n_required)
-        return (max(pending), latest)
-    return None
-
-
-def _evict_stale(
-    pending: dict[int, dict[str, Sample]], fired_fid: int, n_required: int,
-) -> None:
-    """Remove fired entry and incomplete entries older than fired generation."""
-    pending.pop(fired_fid, None)
-    stale = [fid for fid in pending if fid < fired_fid and len(pending[fid]) < n_required]
-    if stale:
-        log.debug("evicted %d stale entries from pending (fired fid=%d)", len(stale), fired_fid)
-    for fid in stale:
-        del pending[fid]
-
-
-# ---------------------------------------------------------------------------
 # NodeInstance
 # ---------------------------------------------------------------------------
 
@@ -197,8 +86,7 @@ class NodeInstance:
         self._clock = clock
         self._pipeline = pipeline
         self._lock = threading.Lock()
-        self._pending: dict[int, dict[str, Sample]] = {}
-        self._match_strategy: str = "single"
+        self._inbox: deque[tuple[str, Sample]] = deque()
         self._metrics: MetricsTracker | None = None
         self._thread: threading.Thread | None = None
         self._running = False
@@ -207,56 +95,46 @@ class NodeInstance:
         self._dispatch_thread: threading.Thread | None = None
         self._failed = False
         self._consecutive_errors = 0
+        self._last_drop_warn_t: float = 0.0
 
-    # Cap the pending-frames map per-node.  The scheduler may not drain
-    # fast enough under load; without a cap the dict grows unbounded
-    # (one entry per frame_id × port-set), which both leaks memory and
-    # delays new frames behind already-stale ones.
-    MAX_PENDING_FRAMES = 30
+    # Cap the per-node inbox.  Arrivals are serialized FIFO and processed
+    # one at a time on the pool thread; if the body is slower than the
+    # incoming rate, the oldest pending arrivals are dropped and a
+    # throttled warning is logged.
+    INBOX_CAP = 60
 
     def on_input(self, port_name: str, sample: Sample) -> None:
-        """Thread-safe: insert sample into pending map and notify scheduler."""
+        """Thread-safe: append (port, sample) to inbox and wake the scheduler."""
         if self._failed:
             return
-        log.debug("on_input: %s.%s fid=%d (pending=%d)", self.node_id, port_name, sample.frame_id, len(self._pending))
-        dropped_oldest: int | None = None
+        dropped = False
         with self._lock:
-            self._pending.setdefault(sample.frame_id, {})[port_name] = sample
-            pending_size = len(self._pending)
-            if pending_size > self.MAX_PENDING_FRAMES:
-                # Drop the oldest pending frame_id to make room.  Old frame
-                # is by definition stale (its peers will never arrive).
-                oldest_fid = min(self._pending)
-                self._pending.pop(oldest_fid, None)
-                dropped_oldest = oldest_fid
-                pending_size = len(self._pending)
-            if pending_size > 10 and pending_size % 10 == 0:
-                log.warning("node '%s' pending backlog: %d frames", self.node_id, pending_size)
-        if dropped_oldest is not None:
+            if len(self._inbox) >= self.INBOX_CAP:
+                self._inbox.popleft()
+                dropped = True
+            self._inbox.append((port_name, sample))
+            depth = len(self._inbox)
+        log.debug("on_input: %s.%s fid=%d (inbox=%d)", self.node_id, port_name, sample.frame_id, depth)
+        if dropped:
             now = time.monotonic()
-            last = self._last_drop_warn_t if hasattr(self, "_last_drop_warn_t") else 0.0
-            if now - last >= 1.0:
-                log.warning(
-                    "node '%s' pending overflow > %d — dropped frame_id %d",
-                    self.node_id, self.MAX_PENDING_FRAMES, dropped_oldest,
-                )
+            if now - self._last_drop_warn_t >= 1.0:
+                log.warning("node '%s' inbox overflow > %d — dropped oldest", self.node_id, self.INBOX_CAP)
                 self._last_drop_warn_t = now
         self._pipeline._schedule_node(self)
 
-    def _invoke(self, items: dict[str, Sample]) -> None:
-        """Call the node function with one sample per input port, dispatch outputs."""
+    def _invoke(self, port_name: str, sample: Sample) -> None:
+        """Call the node function with a single (port, sample) and dispatch outputs."""
         if self._failed:
             return
-        log.debug("invoke: %s (%d items)", self.node_id, len(items))
+        log.debug("invoke: %s.%s fid=%d", self.node_id, port_name, sample.frame_id)
         t0 = time.perf_counter()
         try:
-            for item in items.values():
-                if self._spec.kind == "sink":
-                    self._spec.func(item, state=self._state, config=self._config)
-                else:
-                    result = self._spec.func(item, state=self._state, config=self._config)
-                    if result:
-                        self._pipeline._dispatch(self.node_id, result)
+            if self._spec.kind == "sink":
+                self._spec.func(sample, state=self._state, config=self._config)
+            else:
+                result = self._spec.func(sample, state=self._state, config=self._config)
+                if result:
+                    self._pipeline._dispatch(self.node_id, result)
             self._consecutive_errors = 0
         except Exception:
             self._consecutive_errors += 1
@@ -355,12 +233,15 @@ class NodeInstance:
             self._spec.cleanup_func(self._state, self._config)
 
     def drain(self) -> None:
-        """Process all remaining pending entries in frame_id order (ascending)."""
-        if self._failed or not self._pending:
+        """Process every remaining inbox entry synchronously, in arrival order."""
+        if self._failed:
             return
-        for fid in sorted(self._pending):
-            self._invoke(self._pending[fid])
-        self._pending.clear()
+        while True:
+            with self._lock:
+                if not self._inbox:
+                    return
+                port_name, sample = self._inbox.popleft()
+            self._invoke(port_name, sample)
 
     def update_config(self, key: str, value) -> None:
         """Hot-update a config value (thread-safe for simple types under GIL)."""
@@ -374,10 +255,10 @@ class NodeInstance:
         log.info("config: %s.%s = %r", self.node_id, key, value)
 
     def queue_depth(self) -> int:
-        return len(self._pending)
+        return len(self._inbox)
 
     def backlog_depth(self) -> int:
-        return sum(len(ports) for ports in self._pending.values())
+        return len(self._inbox)
 
 
 # ---------------------------------------------------------------------------
@@ -470,7 +351,7 @@ class Pipeline:
                 self._nodes[conn.dst_id].on_input(conn.dst_port, copy)
 
     def _schedule_node(self, node: NodeInstance) -> None:
-        """Check if a non-source node is fireable and submit to pool."""
+        """Pop the next inbox entry and submit to the pool, one at a time per node."""
         if node._failed:
             return
         if self._mode != PipelineMode.LIVE:
@@ -478,32 +359,23 @@ class Pipeline:
         with self._lock:
             if node.node_id in self._in_flight:
                 return
-            n_required = len(node._connected_ports)
-            if n_required == 0:
+            if not node._inbox:
                 return
-            result = _check_fireable(node._pending, n_required, node._match_strategy)
-            if result is None:
-                return
-            fid, fire_set = result
-            if node._match_strategy == "latest":
-                node._pending.clear()
-            else:
-                _evict_stale(node._pending, fid, n_required)
+            port_name, sample = node._inbox.popleft()
             self._in_flight.add(node.node_id)
-        log.debug("schedule: %s → fireable (fid=%d)", node.node_id, fid)
-        # Submit outside lock
+        log.debug("schedule: %s.%s fid=%d", node.node_id, port_name, sample.frame_id)
         if self._pool:
-            self._pool.submit(self._execute_node, node, fire_set)
+            self._pool.submit(self._execute_node, node, port_name, sample)
 
-    def _execute_node(self, node: NodeInstance, fire_set: dict[str, Sample]) -> None:
-        """Run in pool thread: invoke func, dispatch outputs, re-schedule."""
+    def _execute_node(self, node: NodeInstance, port_name: str, sample: Sample) -> None:
+        """Run in pool thread: invoke func with single (port, sample), then re-schedule."""
         try:
-            node._invoke(fire_set)
+            node._invoke(port_name, sample)
         finally:
             with self._lock:
                 self._in_flight.discard(node.node_id)
             log.debug("executed: %s", node.node_id)
-            # Re-check: new data may have arrived while we were executing
+            # Re-check: new arrivals may be queued while we were executing
             self._schedule_node(node)
 
     def _topological_sort(self) -> list[str]:
@@ -528,13 +400,14 @@ class Pipeline:
         return result
 
     def _drain_backlogs(self) -> None:
-        """Drain all backlogs in topological order."""
+        """Drain all inboxes in topological order."""
         order = self._topological_sort()
         for node_id in order:
             node = self._nodes[node_id]
             if node._spec.kind != "source":
-                if node._pending:
-                    log.debug("draining %s: %d pending", node_id, len(node._pending))
+                depth = node.queue_depth()
+                if depth:
+                    log.debug("draining %s: %d inbox", node_id, depth)
                 node.drain()
 
     def start(self) -> None:
@@ -547,13 +420,6 @@ class Pipeline:
         # Track which ports are actually connected
         for node_id, node in self._nodes.items():
             node._connected_ports = {c.dst_port for c in self._connections if c.dst_id == node_id}
-
-        # Compute matching strategies from source ancestry
-        strategies = _compute_source_ancestry(self._nodes, self._connections)
-        for node_id, strategy in strategies.items():
-            self._nodes[node_id]._match_strategy = strategy
-            log.debug("strategy: %s → %s (ports=%s)", node_id, strategy,
-                      self._nodes[node_id]._connected_ports)
 
         # Init all nodes (failures are logged but don't kill the pipeline)
         for node in self._nodes.values():
