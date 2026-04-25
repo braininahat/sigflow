@@ -147,15 +147,6 @@ def _compute_head_rotation(ref_pts, cur_pts):
     return _rotation_to_euler_xyz(R)
 
 
-def _collapse_ventral(deformed_verts, dorsalness, threshold=0.5):
-    """Collapse ventral vertices to the dorsal centroid so their triangles vanish."""
-    dorsal_mask = dorsalness >= threshold
-    if dorsal_mask.any():
-        centroid = deformed_verts[dorsal_mask].mean(axis=0)
-        deformed_verts[~dorsal_mask] = centroid
-    return deformed_verts
-
-
 def _emit_rest_mesh(state, config, display_callback):
     """Emit the rest-pose tongue mesh (used during calibration)."""
     bone_transforms = state["bone_rest_world"]
@@ -164,9 +155,6 @@ def _emit_rest_mesh(state, config, display_callback):
         state["joint_indices"], state["joint_weights"],
         bone_transforms, state["inv_bind_matrices"],
     )
-    # Hide ventral surface
-    if "vertex_dorsalness" in state:
-        deformed_verts = _collapse_ventral(deformed_verts, state["vertex_dorsalness"])
     uvs = state.get("uvs")
     if uvs is not None:
         interleaved = np.empty((state["num_vertices"], 8), dtype=np.float32)
@@ -607,14 +595,6 @@ def _init_mesh(state, config):
         np.diff(dorsal_pos, axis=0), axis=1
     )  # (10,)
 
-    # Per-vertex dorsalness: fraction of skin weight on dorsal joints (0–10)
-    # Used to hide ventral surface (only show dorsal tongue)
-    dorsalness = np.zeros(mesh["num_vertices"], dtype=np.float32)
-    for k in range(4):
-        is_dorsal = mesh["joint_indices"][:, k] < 11
-        dorsalness += mesh["joint_weights"][:, k] * is_dorsal
-    state["vertex_dorsalness"] = dorsalness
-
     # Precompute index buffer bytes (static, sent once)
     state["index_bytes"] = mesh["indices"].astype(np.uint32).tobytes()
     state["indices_sent"] = False
@@ -953,10 +933,6 @@ def tongue_model_display(item, *, state, config):
         deformed_verts += tmj
 
         deformed_normals = deformed_normals @ Rx.T
-
-    # Hide ventral surface
-    if "vertex_dorsalness" in state:
-        deformed_verts = _collapse_ventral(deformed_verts, state["vertex_dorsalness"])
 
     # Pack interleaved vertex buffer: [pos3 + normal3 [+ uv2]] × V, all float32
     uvs = state.get("uvs")
