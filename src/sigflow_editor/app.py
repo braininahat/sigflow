@@ -20,10 +20,19 @@ def main():
     )
     log.info("sigflow_editor starting (log_level=%s)", level_name)
 
+    log.info("creating QApplication...")
     app = QApplication(sys.argv)
+    log.info("QApplication ready (platform=%s)", app.platformName())
+
+    log.info("constructing EditorWindow...")
     window = EditorWindow()
+    log.info("EditorWindow constructed; showing...")
     window.show()
-    sys.exit(app.exec())
+    log.info("window.show() called (visible=%s, geom=%s); entering Qt event loop",
+             window.isVisible(), window.geometry().getRect())
+    rc = app.exec()
+    log.info("Qt event loop exited (rc=%d)", rc)
+    sys.exit(rc)
 
 
 if __name__ == "__main__":

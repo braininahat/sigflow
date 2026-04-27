@@ -89,27 +89,17 @@ def _discover_audio_inputs():
         return {}
 
 
-def _discover_supported_rates():
-    """Probe the default input device for supported sample rates."""
-    import sounddevice as sd
-    supported = []
-    for rate in _COMMON_RATES:
-        try:
-            sd.check_input_settings(samplerate=float(rate))
-            supported.append(str(rate))
-        except Exception:
-            pass
-    return supported if supported else [str(_COMMON_RATES[3])]  # fallback to 44100
-
+# Use a static rate list rather than probing the device with sd.check_input_settings.
+# Why: probing each rate can segfault PortAudio on Pipewire/PulseAudio systems,
+# which crashes the host process at import time (a C-level segfault can't be caught).
+_RATE_CHOICES = [str(r) for r in _COMMON_RATES]
 
 try:
     _AUDIO_DEVICES = _discover_audio_inputs()
-    _AUDIO_CHOICES = ["default"] + list(_AUDIO_DEVICES.keys())
-    _RATE_CHOICES = _discover_supported_rates()
-except (OSError, ImportError):
+except Exception:
+    log.warning("audio device discovery raised", exc_info=True)
     _AUDIO_DEVICES = {}
-    _AUDIO_CHOICES = ["default"]
-    _RATE_CHOICES = ["48000"]
+_AUDIO_CHOICES = ["default"] + list(_AUDIO_DEVICES.keys())
 
 
 @source_node(

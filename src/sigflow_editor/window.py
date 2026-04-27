@@ -150,6 +150,7 @@ class EditorWindow(QMainWindow):
                  pipeline_bridge=None, protocol_service=None, protocol_name: str | None = None,
                  parent=None):
         super().__init__(parent)
+        log.info("EditorWindow.__init__ begin")
         self.setWindowTitle("sigflow Pipeline Editor")
         self.resize(1200, 800)
         self._pipeline_bridge = pipeline_bridge
@@ -157,11 +158,16 @@ class EditorWindow(QMainWindow):
         self._protocol_name = protocol_name
 
         # Import built-in nodes into registry
+        log.info("importing built-in node modules...")
         self._import_builtin_nodes()
+        log.info("built-in node modules imported (%d nodes registered)", len(all_nodes()))
 
         # NodeGraphQt setup
+        log.info("creating NodeGraph...")
         self._graph = NodeGraph()
+        log.info("registering visual nodes...")
         register_visual_nodes(self._graph)
+        log.info("visual nodes registered")
 
         # Bridge between editor and pipeline runtime
         self._bridge = EditorBridge(self._graph)
@@ -178,10 +184,12 @@ class EditorWindow(QMainWindow):
         )
 
         # Layout
+        log.info("setting central widget (NodeGraph canvas)...")
         graph_widget = self._graph.widget
         self.setCentralWidget(graph_widget)
 
         # Node palette (drag-and-drop to create nodes)
+        log.info("building node palette...")
         nodes_tree = NodesTreeWidget(node_graph=self._graph)
 
         # Set subcategory labels (just the tag name — they'll nest under Processing)
@@ -194,12 +202,14 @@ class EditorWindow(QMainWindow):
 
         # Restructure flat tree into Sources / Processing / Output hierarchy
         _restructure_palette(nodes_tree)
+        log.info("palette built (%d top-level groups)", nodes_tree.topLevelItemCount())
 
         nodes_dock = QDockWidget("Nodes")
         nodes_dock.setWidget(nodes_tree)
         self.addDockWidget(Qt.LeftDockWidgetArea, nodes_dock)
 
         # Properties panel (click a node to edit its properties here)
+        log.info("building properties panel...")
         properties_bin = PropertiesBinWidget(node_graph=self._graph)
         self._graph.node_double_clicked.disconnect(properties_bin.add_node)
         self._graph.node_selected.connect(properties_bin.add_node)
@@ -208,6 +218,7 @@ class EditorWindow(QMainWindow):
         self.addDockWidget(Qt.RightDockWidgetArea, properties_dock)
 
         # Timeline panel (bottom dock)
+        log.info("building timeline panel...")
         self._timeline_panel = TimelinePanel()
         timeline_dock = QDockWidget("Timeline")
         timeline_dock.setWidget(self._timeline_panel)
@@ -225,6 +236,7 @@ class EditorWindow(QMainWindow):
         """)
 
         # Toolbar
+        log.info("building toolbar...")
         toolbar = QToolBar("Pipeline")
         toolbar.setIconSize(QSize(16, 16))
         self.addToolBar(toolbar)
@@ -289,6 +301,7 @@ class EditorWindow(QMainWindow):
             log.info("editor opened in attached mode — Start/Stop/Record disabled")
         else:
             self._apply_action.setEnabled(False)
+        log.info("EditorWindow.__init__ complete")
 
     def _import_builtin_nodes(self):
         _modules = [
@@ -310,11 +323,15 @@ class EditorWindow(QMainWindow):
             "sigflow.nodes.sonostar_source",
         ]
         import importlib
+        import time as _time
         for mod_name in _modules:
+            log.info("  importing %s ...", mod_name)
+            t0 = _time.perf_counter()
             try:
                 importlib.import_module(mod_name)
+                log.info("  imported  %s (%.2fs)", mod_name, _time.perf_counter() - t0)
             except Exception:
-                log.warning("failed to import node module: %s", mod_name, exc_info=True)
+                log.warning("  FAILED   %s (%.2fs)", mod_name, _time.perf_counter() - t0, exc_info=True)
 
     def _on_start(self):
         log.info("starting pipeline from editor")
